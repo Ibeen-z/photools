@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/vincentchyu/photools/internal/logger"
 )
 
 // StayOpenConfig 常驻进程池配置
@@ -415,14 +417,28 @@ func (p *StayOpenPool) releaseWorker(w *StayOpenWorker) {
 
 // Execute 执行一次 ExifTool 指令
 func (p *StayOpenPool) Execute(args ...string) ([]byte, error) {
+	start := time.Now()
 	w, err := p.acquireWorker()
 	if err != nil {
+		logger.Errorf("ExifTool进程池", "获取 Worker 失败: %v", err)
 		return nil, err
 	}
 	defer p.releaseWorker(w)
 
 	reqID := p.reqCounter.Add(1)
-	return w.Execute(reqID, args, p.config.CommandTimeout)
+	out, err := w.Execute(reqID, args, p.config.CommandTimeout)
+	if err != nil {
+		logger.Warnf(
+			"ExifTool进程池", "指令执行报错 [Worker #%d, Req #%d]: %v (参数: %s, 耗时: %v)",
+			w.id, reqID, err, strings.Join(args, " "), time.Since(start),
+		)
+	} else if len(out) > 0 && bytes.Contains(out, []byte("Warning:")) {
+		logger.Debugf(
+			"ExifTool进程池", "指令告警输出 [Worker #%d, Req #%d]: %s",
+			w.id, reqID, strings.TrimSpace(string(out)),
+		)
+	}
+	return out, err
 }
 
 // Close 关闭常驻进程池中所有子进程

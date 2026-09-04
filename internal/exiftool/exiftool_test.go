@@ -1,6 +1,7 @@
 package exiftool
 
 import (
+	"bytes"
 	"errors"
 	"math"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/vincentchyu/photools/internal/domain"
+	"github.com/vincentchyu/photools/internal/logger"
 )
 
 // mockCommandRunner 用于记录调用并模拟返回
@@ -763,6 +765,198 @@ func TestWritePhotoGPSDirectly(t *testing.T) {
 			)
 			if err != nil {
 				t.Fatalf("期望写入及校验成功，但报错: %v", err)
+			}
+		},
+	)
+}
+
+func TestWriteCameraPerspective(t *testing.T) {
+	t.Run(
+		"空路径报错", func(t *testing.T) {
+			runner := &mockCommandRunner{}
+			err := WriteCameraPerspectiveDirectly(runner, "", CameraPerspectivePayload{}, domain.PolicySmart)
+			if err == nil {
+				t.Fatal("期望空路径报错，但得到 nil")
+			}
+		},
+	)
+
+	t.Run(
+		"文件不存在报错", func(t *testing.T) {
+			runner := &mockCommandRunner{}
+			err := WriteCameraPerspectiveDirectly(
+				runner, "/not/exist/pic.jpg", CameraPerspectivePayload{}, domain.PolicySmart,
+			)
+			if err == nil {
+				t.Fatal("期望不存在报错，但得到 nil")
+			}
+		},
+	)
+
+	t.Run(
+		"写入媒体文件参数断言", func(t *testing.T) {
+			runner := &mockCommandRunner{}
+			payload := CameraPerspectivePayload{
+				Heading:      149.0,
+				Pitch:        -15.5,
+				Roll:         0.5,
+				ViewDistance: 7200.0,
+				Provenance: domain.GPSProvenance{
+					Processor: "Manual3DMap",
+				},
+			}
+			err := WritePerspectiveToMedia(runner, "/photos/DSC_0001.JPG", payload)
+			if err != nil {
+				t.Fatalf("WritePerspectiveToMedia 报错: %v", err)
+			}
+			argsStr := strings.Join(runner.lastArgs, " ")
+			if !strings.Contains(argsStr, "-GPS:GPSImgDirection=149.0000") {
+				t.Errorf("缺少真北航向参数: %s", argsStr)
+			}
+			if !strings.Contains(argsStr, "-GPS:GPSImgDirectionRef=T") {
+				t.Errorf("缺少真北基准参数: %s", argsStr)
+			}
+			if !strings.Contains(argsStr, "-XMP-Camera:Pitch=-15.50") {
+				t.Errorf("缺少 XMP-Camera 俯仰角: %s", argsStr)
+			}
+			if !strings.Contains(argsStr, "-XMP-photools:ViewDistance=7200.0") {
+				t.Errorf("缺少 XMP-photools 视距: %s", argsStr)
+			}
+		},
+	)
+
+	t.Run(
+		"写入 XMP 侧车参数断言", func(t *testing.T) {
+			runner := &mockCommandRunner{}
+			payload := CameraPerspectivePayload{
+				Heading:      90.0,
+				Pitch:        0.0,
+				Roll:         0.0,
+				ViewDistance: 3500.0,
+			}
+			err := WritePerspectiveToXMP(runner, "/photos/DSC_0001.xmp", payload)
+			if err != nil {
+				t.Fatalf("WritePerspectiveToXMP 报错: %v", err)
+			}
+			argsStr := strings.Join(runner.lastArgs, " ")
+			if !strings.Contains(argsStr, "-XMP-exif:GPSImgDirection=90.0000") {
+				t.Errorf("缺少 XMP-exif 朝向参数: %s", argsStr)
+			}
+			if !strings.Contains(argsStr, "-XMP-photools:ViewDistance=3500.0") {
+				t.Errorf("缺少 XMP-photools 视距参数: %s", argsStr)
+			}
+		},
+	)
+
+	t.Run(
+		"调度器完整成功与二次校验通过", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			tmpFile := tmpDir + "/DSC_0001.JPG"
+			_ = os.WriteFile(tmpFile, []byte("fake image"), 0644)
+
+			runner := &mockCommandRunner{output: []byte("149.0")}
+			payload := CameraPerspectivePayload{
+				Heading:      149.0,
+				Pitch:        -15.0,
+				Roll:         0.0,
+				ViewDistance: 7200.0,
+			}
+			err := WriteCameraPerspectiveDirectly(runner, tmpFile, payload, domain.PolicySmart)
+			if err != nil {
+				t.Fatalf("期望写入与校验成功，但报错: %v", err)
+			}
+		},
+	)
+
+	t.Run(
+		"向后兼容 WriteImgDirectionDirectly 测试", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			tmpFile := tmpDir + "/DSC_0002.JPG"
+			_ = os.WriteFile(tmpFile, []byte("fake image"), 0644)
+
+			runner := &mockCommandRunner{output: []byte("180.0")}
+			err := WriteImgDirectionDirectly(runner, tmpFile, 180.0, domain.PolicyEmbedOnly)
+			if err != nil {
+				t.Fatalf("期望 WriteImgDirectionDirectly 成功，但报错: %v", err)
+			}
+		},
+	)
+}
+
+func TestExifTool_ReadAndWrite_Logging(t *testing.T) {
+	var buf bytes.Buffer
+	logger.SetOutput(&buf)
+	defer logger.Reset()
+
+	t.Run(
+		"测试 ReadMetadata 日志输出", func(t *testing.T) {
+			buf.Reset()
+			jsonOutput := []byte(`[{
+			"DateTimeOriginal": "2026:08:23 15:30:00",
+			"OffsetTimeOriginal": "+08:00",
+			"GPSPosition": "39 deg 54' 15.00\" N, 116 deg 23' 30.00\" E"
+		}]`)
+			runner := &mockCommandRunner{output: jsonOutput}
+			_, err := ReadMetadata(runner, "/path/to/photo.jpg")
+			if err != nil {
+				t.Fatalf("意外错误: %v", err)
+			}
+			logStr := buf.String()
+			if !strings.Contains(logStr, "[ExifTool读取-元数据]") || !strings.Contains(logStr, "成功读取: photo.jpg") {
+				t.Errorf("日志输出未包含预期的读取信息: %s", logStr)
+			}
+		},
+	)
+
+	t.Run(
+		"测试 ReadBatchMetadataMap 日志输出", func(t *testing.T) {
+			buf.Reset()
+			jsonOutput := []byte(`[{
+			"SourceFile": "/path/to/photo1.jpg",
+			"DateTimeOriginal": "2026:08:23 15:30:00"
+		}]`)
+			runner := &mockCommandRunner{output: jsonOutput}
+			_, err := ReadBatchMetadataMap(runner, []string{"/path/to/photo1.jpg"})
+			if err != nil {
+				t.Fatalf("意外错误: %v", err)
+			}
+			logStr := buf.String()
+			if !strings.Contains(logStr, "[ExifTool读取-批量]") {
+				t.Errorf("日志输出未包含预期的批量读取信息: %s", logStr)
+			}
+		},
+	)
+
+	t.Run(
+		"测试 WriteGeotag 日志输出", func(t *testing.T) {
+			buf.Reset()
+			runner := &mockCommandRunner{output: []byte("1 image files updated")}
+			_, err := WriteGeotag(runner, "/path/to/photo.jpg", []string{"/path/to/track.gpx"}, "0")
+			if err != nil {
+				t.Fatalf("意外错误: %v", err)
+			}
+			logStr := buf.String()
+			if !strings.Contains(logStr, "[ExifTool写入-GPX]") || !strings.Contains(logStr, "GPX 写入原图成功") {
+				t.Errorf("日志输出未包含预期的WriteGeotag信息: %s", logStr)
+			}
+		},
+	)
+
+	t.Run(
+		"测试 InspectPhotoMetadata 日志输出", func(t *testing.T) {
+			buf.Reset()
+			jsonOutput := []byte(`[{
+			"DateTimeOriginal": "2026:08:23 15:30:00",
+			"GPSPosition": "39 deg 54' 15.00\" N, 116 deg 23' 30.00\" E"
+		}]`)
+			runner := &mockCommandRunner{output: jsonOutput}
+			_, err := InspectPhotoMetadata(runner, "/path/to/photo.jpg")
+			if err != nil {
+				t.Fatalf("意外错误: %v", err)
+			}
+			logStr := buf.String()
+			if !strings.Contains(logStr, "[ExifTool读取-探针]") {
+				t.Errorf("日志输出未包含预期的InspectPhotoMetadata信息: %s", logStr)
 			}
 		},
 	)

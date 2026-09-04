@@ -18,6 +18,11 @@ const photoolsConfigContent = `%Image::ExifTool::UserDefined = (
                 TagTable => 'Image::ExifTool::UserDefined::photools',
             },
         },
+        Camera => {
+            SubDirectory => {
+                TagTable => 'Image::ExifTool::UserDefined::Camera',
+            },
+        },
     },
 );
 
@@ -30,6 +35,21 @@ const photoolsConfigContent = `%Image::ExifTool::UserDefined = (
     InterpolateWindow => { },
     Processor => { },
     ProcessedDate => { },
+    ViewDistance => { },
+    Pitch => { },
+    Roll => { },
+    Yaw => { },
+    AttitudeSource => { },
+    AttitudeDate => { },
+);
+
+%Image::ExifTool::UserDefined::Camera = (
+    GROUPS => { 0 => 'XMP', 1 => 'XMP-Camera', 2 => 'Image' },
+    NAMESPACE => { 'Camera' => 'http://pix4d.com/camera/1.0/' },
+    WRITABLE => 'string',
+    Pitch => { },
+    Roll => { },
+    Yaw => { },
 );
 1;
 `

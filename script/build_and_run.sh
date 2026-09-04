@@ -3,11 +3,14 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="PhotoolsApp"
-BUNDLE_ID="com.vincentchyu.photools"
+BUNDLE_ID="com.vincentchyu.photools.macos"
 MIN_SYSTEM_VERSION="13.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_PACKAGE="$ROOT_DIR/macos/PhotoolsApp"
+APP_PACKAGE="$ROOT_DIR/apps/macos/PhotoolsApp"
+if [[ ! -d "$APP_PACKAGE" && -d "$ROOT_DIR/app/macos/PhotoolsApp" ]]; then
+  APP_PACKAGE="$ROOT_DIR/app/macos/PhotoolsApp"
+fi
 DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
@@ -18,6 +21,21 @@ APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 PHOTOOLS_BINARY="$DIST_DIR/photools"
 PHOTOOLS_DYLIB="$DIST_DIR/libphotools.dylib"
+
+# 自动探测有效 Go 编译器 (优先 asdf 活跃版本)
+GO_CMD=""
+if command -v go >/dev/null 2>&1; then
+  GO_CMD="go"
+elif [[ -n "$HOME" && -x "$HOME/.asdf/installs/golang/1.27.1/go/bin/go" ]]; then
+  GO_CMD="$HOME/.asdf/installs/golang/1.27.1/go/bin/go"
+elif [[ -x "$HOME/.asdf/shims/go" ]]; then
+  GO_CMD="$HOME/.asdf/shims/go"
+elif [[ -x "/usr/local/go/bin/go" ]]; then
+  GO_CMD="/usr/local/go/bin/go"
+else
+  echo "❌ 错误: 未找到有效 Go 编译器，请检查 asdf 或 PATH" >&2
+  exit 1
+fi
 
 if [[ "$MODE" == "clean" || "$MODE" == "--clean" ]]; then
   echo "🧹 清理构建产物与 Swift 缓存..."
@@ -32,10 +50,10 @@ killall "$APP_NAME" >/dev/null 2>&1 || pkill -x "$APP_NAME" >/dev/null 2>&1 || t
 mkdir -p "$DIST_DIR"
 
 echo "📦 [1/4] 编译 Go C-Shared 进程内动态库 (libphotools.dylib)..."
-go build -buildmode=c-shared -o "$PHOTOOLS_DYLIB" ./cmd/photools-cshared
+"$GO_CMD" build -buildmode=c-shared -o "$PHOTOOLS_DYLIB" ./cmd/photools-cshared
 
 echo "📦 [2/4] 编译 Go 独立 CLI 工具 (photools)..."
-go build -o "$PHOTOOLS_BINARY" ./cmd/photools
+"$GO_CMD" build -o "$PHOTOOLS_BINARY" ./cmd/photools
 
 echo "📦 [3/4] 编译 Swift 原生 macOS App..."
 swift build --package-path "$APP_PACKAGE"
@@ -63,11 +81,16 @@ if [[ -d "$ROOT_DIR/geodata" ]]; then
   cp -r "$ROOT_DIR/geodata" "$APP_RESOURCES/"
 fi
 
+# 打包 MapLibre 3D 地形离线前端库 (0秒即开免下载)
+if [[ -d "$APP_PACKAGE/Resources/maplibre" ]]; then
+  cp -r "$APP_PACKAGE/Resources/maplibre" "$APP_RESOURCES/"
+fi
+
 # 打包高清原生应用图标 (AppIcon.icns)
 if [[ -f "$ROOT_DIR/img/AppIcon.icns" ]]; then
   cp "$ROOT_DIR/img/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
-elif [[ -f "$ROOT_DIR/macos/PhotoolsApp/Resources/AppIcon.icns" ]]; then
-  cp "$ROOT_DIR/macos/PhotoolsApp/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
+elif [[ -f "$APP_PACKAGE/Resources/AppIcon.icns" ]]; then
+  cp "$APP_PACKAGE/Resources/AppIcon.icns" "$APP_RESOURCES/AppIcon.icns"
 fi
 
 # 自动探测并内置 ExifTool 运行时 (实现免安装自包含)
@@ -132,7 +155,25 @@ case "$MODE" in
   --verify|verify|--build-only)
     echo "✅ 构建验证完成，跳过自动启动"
     ;;
+  --dmg|dmg|--package)
+    PRIMARY_DMG="$DIST_DIR/photools-macOS.dmg"
+    ALIAS_DMG="$DIST_DIR/${APP_NAME}.dmg"
+    DMG_TMP_DIR="$DIST_DIR/dmg_tmp"
+    echo "💿 [5/5] 开始生成标准 macOS 磁盘安装镜像 (DMG)..."
+    rm -rf "$DMG_TMP_DIR" "$PRIMARY_DMG" "$ALIAS_DMG"
+    mkdir -p "$DMG_TMP_DIR"
+    cp -r "$APP_BUNDLE" "$DMG_TMP_DIR/"
+    ln -s /Applications "$DMG_TMP_DIR/Applications"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_TMP_DIR" -ov -format UDZO "$PRIMARY_DMG" >/dev/null
+    rm -rf "$DMG_TMP_DIR"
+    cp "$PRIMARY_DMG" "$ALIAS_DMG"
+    shasum -a 256 "$PRIMARY_DMG" > "${PRIMARY_DMG}.sha256"
+    shasum -a 256 "$ALIAS_DMG" > "${ALIAS_DMG}.sha256"
+    echo "🎉 macOS 发布级 DMG 镜像封包成功: $PRIMARY_DMG"
+    echo "🔗 镜像别名已同步: $ALIAS_DMG"
+    echo "🔑 SHA256 校验和已生成: ${PRIMARY_DMG}.sha256"
+    ;;
   *)
-    echo "用法: $0 [run|--build-only|--debug|--verify|clean]"
+    echo "用法: $0 [run|--build-only|--debug|--verify|--dmg|clean]"
     ;;
 esac

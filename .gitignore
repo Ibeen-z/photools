@@ -12,7 +12,9 @@ dist/*
 /pkg/geodata/data/
 /scratch/
 /photools
-
+*tmp*
+.*/
+*.dylib
 # macOS
 .DS_Store
 .AppleDouble
@@ -31,3 +33,8 @@ dist/*
 *.xcodeproj/
 *.xcworkspace/
 DerivedData/
+img/ios_raw_backup/
+
+# Camera Credentials & Bluetooth Captures (Private)
+camera_credentials.json
+*.pklg

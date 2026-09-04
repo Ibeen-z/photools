@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/vincentchyu/photools/internal/domain"
+	"github.com/vincentchyu/photools/internal/logger"
 )
 
 // GPSWritePayload 统领全库所有 GPS 写入操作的数据载荷
@@ -126,27 +128,41 @@ func FindAssetGroupForPath(filePath string) domain.AssetGroup {
 
 // VerifyGPSTags 执行二次读取校验，确认目标文件（媒体或 XMP）中确实已写入有效 GPSPosition 或 GPSLatitude
 func VerifyGPSTags(runner CommandRunner, filePath string) error {
+	start := time.Now()
 	if filePath == "" {
+		logger.Warnf("ExifTool校验-GPS", "二次回读校验路径为空")
 		return errors.New("二次校验路径为空")
 	}
+	logger.Debugf("ExifTool校验-GPS", "正在二次回读校验: %s", filepath.Base(filePath))
 	checkOut, _ := runner.CombinedOutput("exiftool", "-m", "-q", "-s3", "-GPSPosition", filePath)
-	if len(bytes.TrimSpace(checkOut)) == 0 {
+	posStr := strings.TrimSpace(string(checkOut))
+	if len(posStr) == 0 {
 		checkLat, _ := runner.CombinedOutput("exiftool", "-m", "-q", "-s3", "-GPSLatitude", filePath)
-		if len(bytes.TrimSpace(checkLat)) == 0 {
-			return fmt.Errorf("GPS 二次校验失败：未在目标文件 %s 中检测到有效 GPS 坐标", filePath)
+		latStr := strings.TrimSpace(string(checkLat))
+		if len(latStr) == 0 {
+			err := fmt.Errorf("GPS 二次校验失败：未在目标文件 %s 中检测到有效 GPS 坐标", filePath)
+			logger.Errorf("ExifTool校验-GPS", "%v (耗时: %v)", err, time.Since(start))
+			return err
 		}
+		posStr = "Lat:" + latStr
 	}
+	logger.Successf("ExifTool校验-GPS", "二次校验通过: %s (坐标: %s, 耗时: %v)", filePath, posStr, time.Since(start))
 	return nil
 }
 
 // VerifyLocationTags 执行二次读取校验，确认目标文件（媒体或 XMP）中确实已写入有效国家/城市等派生地名，且无重复标签树
 func VerifyLocationTags(runner CommandRunner, filePath string) error {
+	start := time.Now()
 	if filePath == "" {
+		logger.Warnf("ExifTool校验-地名", "二次回读校验路径为空")
 		return errors.New("二次校验路径为空")
 	}
+	logger.Debugf("ExifTool校验-地名", "正在二次回读校验: %s", filepath.Base(filePath))
 	checkOut, _ := runner.CombinedOutput("exiftool", "-m", "-q", "-s3", "-City", "-Country", "-State", filePath)
 	if len(bytes.TrimSpace(checkOut)) == 0 {
-		return fmt.Errorf("地名二次校验失败：未在目标文件 %s 中检测到有效城市或国家元数据", filePath)
+		err := fmt.Errorf("地名二次校验失败：未在目标文件 %s 中检测到有效城市或国家元数据", filePath)
+		logger.Errorf("ExifTool校验-地名", "%v (耗时: %v)", err, time.Since(start))
+		return err
 	}
 
 	tags, err := ReadLocationTags(runner, filePath)
@@ -154,27 +170,55 @@ func VerifyLocationTags(runner CommandRunner, filePath string) error {
 		seen := make(map[string]bool)
 		for _, tree := range tags.HierarchicalSubject {
 			if seen[tree] {
-				return fmt.Errorf("地名二次校验失败：目标文件 %s 存在重复分层标签树: %s", filePath, tree)
+				err := fmt.Errorf("地名二次校验失败：目标文件 %s 存在重复分层标签树: %s", filePath, tree)
+				logger.Errorf("ExifTool校验-地名", "%v (耗时: %v)", err, time.Since(start))
+				return err
 			}
 			seen[tree] = true
 		}
 	}
 
+	logger.Successf(
+		"ExifTool校验-地名", "二次校验通过: %s (分层标签树: %d 个, 耗时: %v)", filePath, len(tags.HierarchicalSubject),
+		time.Since(start),
+	)
 	return nil
 }
 
 // WriteGPS 全局唯一第二层修正事实调度引擎：将 GPS 元数据严格按照 SidecarPolicy 调度写入摄影资产组
 func WriteGPS(
 	runner CommandRunner, asset domain.AssetGroup, payload GPSWritePayload, policy domain.SidecarPolicy,
-) ([]string, error) {
+) (modified []string, finalErr error) {
+	start := time.Now()
 	primary := asset.PrimaryPath()
 	if primary == "" {
-		return nil, errors.New("资产组缺少有效的主媒体文件")
+		finalErr = errors.New("资产组缺少有效的主媒体文件")
+		logger.Errorf("调度器-GPS写入", "%v", finalErr)
+		return nil, finalErr
 	}
 
 	normPolicy := domain.NormalizePolicy(string(policy))
 	canClone := payload.HasCloneSource()
 	src := payload.SourcePhotoPath
+
+	logger.Infof(
+		"调度器-GPS写入", "启动资产组 GPS 调度写入: %s (策略: %s, 克隆源: %v, 坐标: %.6f, %.6f, 来源: %s)",
+		asset.DisplayName(), normPolicy, canClone, payload.Latitude, payload.Longitude, payload.Provenance.Source,
+	)
+
+	defer func() {
+		if finalErr != nil {
+			logger.Errorf(
+				"调度器-GPS写入", "资产组 GPS 调度写入失败: %s -> %v (耗时: %v)",
+				asset.DisplayName(), finalErr, time.Since(start),
+			)
+		} else {
+			logger.Successf(
+				"调度器-GPS写入", "资产组 GPS 调度写入完成: %s (已修改文件: %s, 耗时: %v)",
+				asset.DisplayName(), strings.Join(modified, ", "), time.Since(start),
+			)
+		}
+	}()
 
 	// 原子操作辅助函数
 	writeMedia := func(target string) error {
@@ -193,7 +237,6 @@ func WriteGPS(
 		)
 	}
 
-	var modified []string
 	record := func(path string) {
 		if path != "" && !slices.Contains(modified, path) {
 			modified = append(modified, path)
@@ -329,14 +372,35 @@ func WriteGPS(
 // WriteLocation 全局唯一第三层派生信息调度引擎：将逆地理中文地名严格按照 SidecarPolicy 调度写入摄影资产组
 func WriteLocation(
 	runner CommandRunner, asset domain.AssetGroup, loc domain.LocationInfo, policy domain.SidecarPolicy,
-) ([]string, error) {
+) (modified []string, finalErr error) {
+	start := time.Now()
 	primary := asset.PrimaryPath()
 	if primary == "" {
-		return nil, errors.New("资产组缺少有效的主媒体文件")
+		finalErr = errors.New("资产组缺少有效的主媒体文件")
+		logger.Errorf("调度器-地名写入", "%v", finalErr)
+		return nil, finalErr
 	}
 
 	normPolicy := domain.NormalizePolicy(string(policy))
-	var modified []string
+	logger.Infof(
+		"调度器-地名写入", "启动资产组地名调度写入: %s (策略: %s, 地名: %s, 国家: %s, 城市: %s)",
+		asset.DisplayName(), normPolicy, loc.FormatSummary(), loc.Country, loc.City,
+	)
+
+	defer func() {
+		if finalErr != nil {
+			logger.Errorf(
+				"调度器-地名写入", "资产组地名调度写入失败: %s -> %v (耗时: %v)",
+				asset.DisplayName(), finalErr, time.Since(start),
+			)
+		} else {
+			logger.Successf(
+				"调度器-地名写入", "资产组地名调度写入完成: %s (已修改文件: %s, 耗时: %v)",
+				asset.DisplayName(), strings.Join(modified, ", "), time.Since(start),
+			)
+		}
+	}()
+
 	record := func(path string) {
 		if path != "" && !slices.Contains(modified, path) {
 			modified = append(modified, path)

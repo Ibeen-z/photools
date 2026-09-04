@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"maps"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,6 +54,10 @@ type GlobalSettings struct {
 	TestBackup          bool     `json:"test_backup,omitempty"`          // 处理前是否快照备份源文件
 	BackupDir           string   `json:"backup_dir,omitempty"`           // 自定义备份目录
 	Language            string   `json:"language,omitempty"`             // 界面与补全语言: zh-CN, en-US
+	ProxyEnabled        bool     `json:"proxy_enabled,omitempty"`        // 是否启用网络代理 (针对无法开启 TUN 模式的系统)
+	ProxyType           string   `json:"proxy_type,omitempty"`           // 代理协议类型: http, socks5 (默认 http)
+	ProxyHost           string   `json:"proxy_host,omitempty"`           // 代理服务器主机: 如 127.0.0.1
+	ProxyPort           int      `json:"proxy_port,omitempty"`           // 代理服务端口: 如 7890
 }
 
 // SessionConfig 封装当前运行时会话的全部配置（全局配置 + 各插件独立配置）
@@ -113,6 +119,10 @@ func DefaultGlobalSettings(baseDir ...string) GlobalSettings {
 		TestBackup:          false,
 		BackupDir:           filepath.Join(bDir, "Inbox_bak"),
 		Language:            "en-US",
+		ProxyEnabled:        false,
+		ProxyType:           "http",
+		ProxyHost:           "127.0.0.1",
+		ProxyPort:           7890,
 	}
 }
 
@@ -151,6 +161,16 @@ func NewSessionConfig(cfg *PluginsConfig, baseDir ...string) *SessionConfig {
 		sc.Global.FlatMode = cfg.Global.FlatMode
 		sc.Global.AllowNoGPS = cfg.Global.AllowNoGPS
 		sc.Global.TestBackup = cfg.Global.TestBackup
+		sc.Global.ProxyEnabled = cfg.Global.ProxyEnabled
+		if cfg.Global.ProxyType != "" {
+			sc.Global.ProxyType = cfg.Global.ProxyType
+		}
+		if cfg.Global.ProxyHost != "" {
+			sc.Global.ProxyHost = cfg.Global.ProxyHost
+		}
+		if cfg.Global.ProxyPort > 0 {
+			sc.Global.ProxyPort = cfg.Global.ProxyPort
+		}
 	}
 
 	for _, p := range cfg.Plugins {
@@ -255,6 +275,10 @@ func (s *SessionConfig) ApplyToPluginsConfig(cfg *PluginsConfig) {
 	cfg.Global.CompanionExtensions = s.Global.CompanionExtensions
 	cfg.Global.RawExtensions = s.Global.RawExtensions
 	cfg.Global.Workers = s.Global.Workers
+	cfg.Global.ProxyEnabled = s.Global.ProxyEnabled
+	cfg.Global.ProxyType = s.Global.ProxyType
+	cfg.Global.ProxyHost = s.Global.ProxyHost
+	cfg.Global.ProxyPort = s.Global.ProxyPort
 
 	for i := range cfg.Plugins {
 		p := &cfg.Plugins[i]
@@ -267,6 +291,50 @@ func (s *SessionConfig) ApplyToPluginsConfig(cfg *PluginsConfig) {
 			for k, v := range opt.Options {
 				p.Options[k] = v
 			}
+		}
+	}
+}
+
+// ProxyURL 返回当前全局配置下的网络代理完整 URL (例如 "http://127.0.0.1:7890" 或 "socks5://127.0.0.1:7890")
+// 若未启用代理或配置不合法则返回空字符串
+func (g GlobalSettings) ProxyURL() string {
+	if !g.ProxyEnabled || strings.TrimSpace(g.ProxyHost) == "" || g.ProxyPort <= 0 {
+		return ""
+	}
+	pType := strings.ToLower(strings.TrimSpace(g.ProxyType))
+	if pType == "" {
+		pType = "http"
+	}
+	return fmt.Sprintf("%s://%s:%d", pType, strings.TrimSpace(g.ProxyHost), g.ProxyPort)
+}
+
+// ApplyGlobalProxy 根据全局配置设置进程网络环境变量 (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY 等)
+// 并动态更新 http.DefaultTransport 的 Proxy 策略，确保外部网络请求（包括 geodata 下载与瓦片代理）走用户指定内核
+func ApplyGlobalProxy(g GlobalSettings) {
+	proxyURLStr := g.ProxyURL()
+	if proxyURLStr == "" {
+		_ = os.Unsetenv("HTTP_PROXY")
+		_ = os.Unsetenv("HTTPS_PROXY")
+		_ = os.Unsetenv("ALL_PROXY")
+		_ = os.Unsetenv("http_proxy")
+		_ = os.Unsetenv("https_proxy")
+		_ = os.Unsetenv("all_proxy")
+		if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+			tr.Proxy = http.ProxyFromEnvironment
+		}
+		return
+	}
+
+	_ = os.Setenv("HTTP_PROXY", proxyURLStr)
+	_ = os.Setenv("HTTPS_PROXY", proxyURLStr)
+	_ = os.Setenv("ALL_PROXY", proxyURLStr)
+	_ = os.Setenv("http_proxy", proxyURLStr)
+	_ = os.Setenv("https_proxy", proxyURLStr)
+	_ = os.Setenv("all_proxy", proxyURLStr)
+
+	if parsedURL, err := url.Parse(proxyURLStr); err == nil {
+		if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+			tr.Proxy = http.ProxyURL(parsedURL)
 		}
 	}
 }
@@ -374,6 +442,39 @@ func GlobalOptionSpecs() []OptionSpec {
 			Choices:      []string{"zh-CN", "en-US"},
 			Scope:        ScopeGlobal,
 			DefaultValue: "zh-CN",
+		},
+		{
+			Key:          "proxy_enabled",
+			NameKey:      "optProxyEnabledName",
+			DescKey:      "optProxyEnabledDesc",
+			Type:         TypeBool,
+			Scope:        ScopeGlobal,
+			DefaultValue: false,
+		},
+		{
+			Key:          "proxy_type",
+			NameKey:      "optProxyTypeName",
+			DescKey:      "optProxyTypeDesc",
+			Type:         TypeChoice,
+			Choices:      []string{"http", "socks5"},
+			Scope:        ScopeGlobal,
+			DefaultValue: "http",
+		},
+		{
+			Key:          "proxy_host",
+			NameKey:      "optProxyHostName",
+			DescKey:      "optProxyHostDesc",
+			Type:         TypeString,
+			Scope:        ScopeGlobal,
+			DefaultValue: "127.0.0.1",
+		},
+		{
+			Key:          "proxy_port",
+			NameKey:      "optProxyPortName",
+			DescKey:      "optProxyPortDesc",
+			Type:         TypeInt,
+			Scope:        ScopeGlobal,
+			DefaultValue: 7890,
 		},
 	}
 }

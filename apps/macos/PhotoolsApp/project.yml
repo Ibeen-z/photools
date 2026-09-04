@@ -1,0 +1,56 @@
+name: PhotoolsApp
+options:
+  bundleIdPrefix: com.vincentchyu.photools
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+
+packages:
+  PhotoolsPackage:
+    path: .
+
+schemes:
+  PhotoolsApp:
+    build:
+      targets:
+        PhotoolsApp: all
+    run:
+      config: Debug
+
+targets:
+  PhotoolsApp:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Sources/PhotoolsApp
+      - path: Resources
+    dependencies:
+      - package: PhotoolsPackage
+        product: PhotoolsCore
+    info:
+      path: Sources/PhotoolsApp/Info.plist
+      properties:
+        CFBundleDisplayName: "Photools"
+        CFBundleName: "PhotoolsApp"
+        CFBundleDevelopmentRegion: "zh_CN"
+        CFBundlePackageType: "APPL"
+        CFBundleIconFile: "AppIcon"
+        CFBundleIconName: "AppIcon"
+        LSMinimumSystemVersion: "13.0"
+        NSPrincipalClass: "NSApplication"
+        NSLocationWhenInUseUsageDescription: "需要获取拍摄地地理信息以反查中文逆地理地名及海拔信息"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vincentchyu.photools.macos
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"

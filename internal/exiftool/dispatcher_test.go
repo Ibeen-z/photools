@@ -1,11 +1,14 @@
 package exiftool
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vincentchyu/photools/internal/domain"
+	"github.com/vincentchyu/photools/internal/logger"
 )
 
 func TestFindAssetGroupForPath(t *testing.T) {
@@ -183,4 +186,68 @@ func TestWriteLocation_Dispatcher(t *testing.T) {
 			}
 		},
 	)
+}
+
+func TestDispatcher_Logging(t *testing.T) {
+	var buf bytes.Buffer
+	logger.SetOutput(&buf)
+	defer logger.Reset()
+
+	runner := &mockCommandRunner{output: []byte("31.230000 N, 121.470000 E")}
+	tmpDir := t.TempDir()
+
+	raw := filepath.Join(tmpDir, "DSC_0003.NEF")
+	jpg := filepath.Join(tmpDir, "DSC_0003.JPG")
+	_ = os.WriteFile(raw, []byte("raw"), 0644)
+	_ = os.WriteFile(jpg, []byte("jpg"), 0644)
+
+	asset := domain.AssetGroup{
+		BaseName: "DSC_0003",
+		Dir:      tmpDir,
+		RawPath:  raw,
+		JPGPath:  jpg,
+	}
+
+	payload := GPSWritePayload{
+		Latitude:  31.23,
+		Longitude: 121.47,
+		Altitude:  10.0,
+		Provenance: domain.GPSProvenance{
+			Source: "manual_copied",
+		},
+	}
+
+	_, err := WriteGPS(runner, asset, payload, domain.PolicySmart)
+	if err != nil {
+		t.Fatalf("WriteGPS error: %v", err)
+	}
+
+	logStr := buf.String()
+	if !strings.Contains(logStr, "[调度器-GPS写入]") {
+		t.Errorf("expected [调度器-GPS写入] in log, got:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, "[ExifTool写入-坐标]") {
+		t.Errorf("expected [ExifTool写入-坐标] in log, got:\n%s", logStr)
+	}
+	if !strings.Contains(logStr, "[ExifTool校验-GPS]") {
+		t.Errorf("expected [ExifTool校验-GPS] in log, got:\n%s", logStr)
+	}
+
+	buf.Reset()
+	loc := domain.LocationInfo{
+		Country: "中国",
+		City:    "上海市",
+	}
+	_, err = WriteLocation(runner, asset, loc, domain.PolicySmart)
+	if err != nil {
+		t.Fatalf("WriteLocation error: %v", err)
+	}
+
+	locLogStr := buf.String()
+	if !strings.Contains(locLogStr, "[调度器-地名写入]") {
+		t.Errorf("expected [调度器-地名写入] in log, got:\n%s", locLogStr)
+	}
+	if !strings.Contains(locLogStr, "[ExifTool写入-地名]") {
+		t.Errorf("expected [ExifTool写入-地名] in log, got:\n%s", locLogStr)
+	}
 }

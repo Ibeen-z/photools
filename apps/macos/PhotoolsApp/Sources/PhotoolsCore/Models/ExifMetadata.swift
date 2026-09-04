@@ -1,0 +1,433 @@
+import Foundation
+
+public struct ExifTagItem: Identifiable, Hashable, Sendable {
+    public var id: String { "\(group):\(tag)" }
+    public let group: String
+    public let tag: String
+    public let value: String
+
+    public init(group: String, tag: String, value: String) {
+        self.group = group
+        self.tag = tag
+        self.value = value
+    }
+}
+
+public struct ExifMetadata: Sendable {
+    public let filePath: String
+    public let fileName: String
+    public let fileSize: String
+    public let fileModifyDate: String
+
+    // 核心拍摄参数
+    public let cameraMake: String?
+    public let cameraModel: String?
+    public let lensModel: String?
+    public let dateTimeOriginal: String?
+    public let exposureTime: String?
+    public let fNumber: String?
+    public let iso: String?
+    public let focalLength: String?
+    public let exposureProgram: String?
+
+    // GPS 坐标、海拔与镜头朝向
+    public let latitude: Double?
+    public let longitude: Double?
+    public let altitude: Double?
+    public let gpsPosition: String?
+    public let gpsImgDirection: Double?
+    public let gpsImgDirectionRef: String?
+    public let focalLengthIn35mm: Double?
+
+    // 机身三轴陀螺仪姿态与光学视场角 (Nikon MakerNotes / ExifTool Composite)
+    public let yawAngle: Double?
+    public let pitchAngle: Double?
+    public let rollAngle: Double?
+    public let rawFOV: Double?
+    public let focusDistance: String?
+    public let viewDistance: Double?
+
+    // 智能相机空间姿态与光学解算（多机型策略模式）
+    public let cameraAttitude: CameraAttitude?
+
+    // IPTC / XMP 中文地名与元数据
+    public let country: String?
+    public let province: String?
+    public let city: String?
+    public let district: String?
+    public let title: String?
+    public let description: String?
+
+    // 溯源指纹与来源标记 (Provenance)
+    public let gpsSource: String?
+    public let gpsMatchMethod: String?
+    public let interpolateWindow: String?
+    public let processor: String?
+    public let processedDate: String?
+    public let geocodeSource: String?
+    public let sidecarPath: String?
+
+    // 全部原始标签列表（按 Group 分组）
+    public let rawTags: [ExifTagItem]
+
+    public init(
+        filePath: String,
+        fileName: String,
+        fileSize: String,
+        fileModifyDate: String,
+        cameraMake: String? = nil,
+        cameraModel: String? = nil,
+        lensModel: String? = nil,
+        dateTimeOriginal: String? = nil,
+        exposureTime: String? = nil,
+        fNumber: String? = nil,
+        iso: String? = nil,
+        focalLength: String? = nil,
+        exposureProgram: String? = nil,
+        latitude: Double? = nil,
+        longitude: Double? = nil,
+        altitude: Double? = nil,
+        gpsPosition: String? = nil,
+        gpsImgDirection: Double? = nil,
+        gpsImgDirectionRef: String? = nil,
+        focalLengthIn35mm: Double? = nil,
+        yawAngle: Double? = nil,
+        pitchAngle: Double? = nil,
+        rollAngle: Double? = nil,
+        rawFOV: Double? = nil,
+        focusDistance: String? = nil,
+        viewDistance: Double? = nil,
+        country: String? = nil,
+        province: String? = nil,
+        city: String? = nil,
+        district: String? = nil,
+        title: String? = nil,
+        description: String? = nil,
+        gpsSource: String? = nil,
+        gpsMatchMethod: String? = nil,
+        interpolateWindow: String? = nil,
+        processor: String? = nil,
+        processedDate: String? = nil,
+        geocodeSource: String? = nil,
+        sidecarPath: String? = nil,
+        cameraAttitude: CameraAttitude? = nil,
+        rawTags: [ExifTagItem] = []
+    ) {
+        self.filePath = filePath
+        self.fileName = fileName
+        self.fileSize = fileSize
+        self.fileModifyDate = fileModifyDate
+        self.cameraMake = cameraMake
+        self.cameraModel = cameraModel
+        self.lensModel = lensModel
+        self.dateTimeOriginal = dateTimeOriginal
+        self.exposureTime = exposureTime
+        self.fNumber = fNumber
+        self.iso = iso
+        self.focalLength = focalLength
+        self.exposureProgram = exposureProgram
+        self.latitude = latitude
+        self.longitude = longitude
+        self.altitude = altitude
+        self.gpsPosition = gpsPosition
+        self.gpsImgDirection = gpsImgDirection
+        self.gpsImgDirectionRef = gpsImgDirectionRef
+        self.focalLengthIn35mm = focalLengthIn35mm
+        self.yawAngle = yawAngle
+        self.pitchAngle = pitchAngle
+        self.rollAngle = rollAngle
+        self.rawFOV = rawFOV
+        self.focusDistance = focusDistance
+        self.viewDistance = viewDistance
+        self.cameraAttitude = cameraAttitude
+        self.country = country
+        self.province = province
+        self.city = city
+        self.district = district
+        self.title = title
+        self.description = description
+        self.gpsSource = gpsSource
+        self.gpsMatchMethod = gpsMatchMethod
+        self.interpolateWindow = interpolateWindow
+        self.processor = processor
+        self.processedDate = processedDate
+        self.geocodeSource = geocodeSource
+        self.sidecarPath = sidecarPath
+        self.rawTags = rawTags
+    }
+
+    public var hasGPS: Bool {
+        latitude != nil && longitude != nil
+    }
+
+    /// 有效镜头地理罗盘朝向角度 (仅来自标准 EXIF GPSImgDirection，即真北/磁北绝对地理方位)
+    public var effectiveHeading: Double? {
+        gpsImgDirection
+    }
+
+    /// 尼康机内五轴防抖/水平仪偏航角 (注意：机身姿态陀螺仪仅记录握持倾斜参考，无磁力计非地理真北罗盘)
+    public var gyroYawAngle: Double? {
+        yawAngle
+    }
+
+    /// 真实物理对焦距离（米，自动从 "17.4 m" 等文本中解析出纯数值）
+    public var focusDistanceMeters: Double? {
+        if let attitudeFocus = cameraAttitude?.focusDistanceMeters {
+            return attitudeFocus
+        }
+        guard let fd = focusDistance else { return nil }
+        let clean = fd.replacingOccurrences(of: "m", with: "").trimmingCharacters(in: .whitespaces)
+        if let val = Double(clean), val > 0.1 {
+            return val
+        }
+        return nil
+    }
+
+    /// 水平视场角 (优先使用 ExifTool Composite:FOV，若无则根据等效焦距计算)
+    public var fieldOfView: Double? {
+        if let rf = rawFOV, rf > 1.0 {
+            return rf
+        }
+        if let fl = focalLengthIn35mm, fl > 1.0 {
+            return CoordinateConverter.calculateFOV(focalLength: fl)
+        }
+        if let flStr = focalLength {
+            let clean = flStr.replacingOccurrences(of: "mm", with: "").trimmingCharacters(in: .whitespaces)
+            if let fl = Double(clean), fl > 1.0 {
+                return CoordinateConverter.calculateFOV(focalLength: fl)
+            }
+        }
+        return nil
+    }
+
+    public var hasProvenance: Bool {
+        (gpsSource != nil && !gpsSource!.isEmpty) ||
+        (processor != nil && !processor!.isEmpty) ||
+        (gpsMatchMethod != nil && !gpsMatchMethod!.isEmpty)
+    }
+
+    public var cameraSummary: String {
+        if let model = cameraModel, !model.isEmpty {
+            if let make = cameraMake, !make.isEmpty, !model.lowercased().contains(make.lowercased()) {
+                return "\(make) \(model)"
+            }
+            return model
+        }
+        if let make = cameraMake, !make.isEmpty {
+            return make
+        }
+        return "未知相机型号"
+    }
+
+    public var exposureSummary: String {
+        var parts: [String] = []
+        if let exp = exposureTime, !exp.isEmpty {
+            parts.append(exp.hasSuffix("s") ? exp : "\(exp)s")
+        }
+        if let fn = fNumber, !fn.isEmpty {
+            parts.append(fn.starts(with: "f/") || fn.starts(with: "F/") ? fn : "f/\(fn)")
+        }
+        if let isoVal = iso, !isoVal.isEmpty {
+            parts.append("ISO \(isoVal)")
+        }
+        if let fl = focalLength, !fl.isEmpty {
+            parts.append(fl.hasSuffix("mm") ? fl : "\(fl)mm")
+        }
+        return parts.isEmpty ? "未记录曝光参数" : parts.joined(separator: " · ")
+    }
+
+    public var locationSummary: String? {
+        var parts: [String] = []
+        if let c = country, !c.isEmpty { parts.append(c) }
+        if let p = province, !p.isEmpty { parts.append(p) }
+        if let ct = city, !ct.isEmpty && ct != province { parts.append(ct) }
+        if let d = district, !d.isEmpty { parts.append(d) }
+        if parts.isEmpty {
+            return nil
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    public static func parse(from dict: [String: Any], fallbackPath: String) -> ExifMetadata {
+        func strVal(_ keys: String...) -> String? {
+            for k in keys {
+                if let val = dict[k] {
+                    let s = "\(val)".trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !s.isEmpty && s != "<nil>" && s != "0" && s != "undef" && s != "-" {
+                        return s
+                    }
+                }
+            }
+            return nil
+        }
+
+        func doubleVal(_ keys: String...) -> Double? {
+            for k in keys {
+                if let val = dict[k] {
+                    if let d = val as? Double { return d }
+                    if let s = val as? String, let d = Double(s) { return d }
+                    if let num = val as? NSNumber { return num.doubleValue }
+                }
+            }
+            return nil
+        }
+
+        let filePath = strVal("file_path", "SourceFile") ?? fallbackPath
+        let fileName = strVal("file_name") ?? (filePath as NSString).lastPathComponent
+        let fileSize = strVal("file_size") ?? ""
+        let modDate = strVal("file_modify_date") ?? ""
+
+        let make = strVal("camera_make", "EXIF:Make", "Make")
+        let model = strVal("camera_model", "EXIF:Model", "Model")
+        let lens = strVal("lens_model", "EXIF:LensModel", "XMP:LensModel", "MakerNotes:Lens", "MakerNotes:LensType", "LensModel", "Composite:LensSpec", "Composite:LensID", "Lens")
+        let date = strVal("date_time_original", "EXIF:DateTimeOriginal", "XMP:DateTimeOriginal", "DateTimeOriginal")
+        let exposure = strVal("exposure_time", "EXIF:ExposureTime", "ExposureTime")
+        let fNumber = strVal("f_number", "EXIF:FNumber", "FNumber")
+        let iso = strVal("iso", "EXIF:ISO", "ISO")
+        let focal = strVal("focal_length", "EXIF:FocalLength", "FocalLength")
+        let program = strVal("exposure_program", "EXIF:ExposureProgram", "ExposureProgram")
+
+        let lat = doubleVal("latitude", "Composite:GPSLatitude", "GPS:GPSLatitude", "GPSLatitude", "XMP:GPSLatitude")
+        let lon = doubleVal("longitude", "Composite:GPSLongitude", "GPS:GPSLongitude", "GPSLongitude", "XMP:GPSLongitude")
+        let alt = doubleVal("altitude", "Composite:GPSAltitude", "GPS:GPSAltitude", "GPSAltitude", "XMP:GPSAltitude")
+        let pos = strVal("gps_position", "Composite:GPSPosition", "GPSPosition")
+        let imgDir = doubleVal(
+            "gps_img_direction",
+            "Composite:GPSImgDirection",
+            "GPS:GPSImgDirection",
+            "GPSImgDirection",
+            "XMP:GPSImgDirection",
+            "gps_dest_bearing",
+            "Composite:GPSDestBearing",
+            "GPS:GPSDestBearing",
+            "GPSDestBearing",
+            "XMP:GPSDestBearing"
+        )
+        let imgDirRef = strVal(
+            "gps_img_direction_ref",
+            "GPS:GPSImgDirectionRef",
+            "GPSImgDirectionRef",
+            "XMP:GPSImgDirectionRef",
+            "gps_dest_bearing_ref",
+            "GPS:GPSDestBearingRef",
+            "GPSDestBearingRef",
+            "XMP:GPSDestBearingRef"
+        )
+        let focal35mm = doubleVal("focal_length_in_35mm_format", "EXIF:FocalLengthIn35mmFormat", "Composite:FocalLength35efl", "FocalLengthIn35mmFormat")
+
+        let yaw = doubleVal("yaw_angle", "MakerNotes:YawAngle", "YawAngle")
+        let pitch = doubleVal("pitch_angle", "MakerNotes:PitchAngle", "PitchAngle")
+        let roll = doubleVal("roll_angle", "MakerNotes:RollAngle", "RollAngle")
+        let fovStr = strVal("fov", "Composite:FOV", "FOV")
+        let rawFOV: Double? = {
+            guard let s = fovStr else { return nil }
+            let clean = s.replacingOccurrences(of: "deg", with: " ")
+            let parts = clean.split(separator: " ")
+            if let first = parts.first, let d = Double(first) {
+                return d
+            }
+            return nil
+        }()
+        let focusDist = strVal("focus_distance", "MakerNotes:FocusDistance", "FocusDistance")
+
+        let country = strVal("country", "XMP:Country", "XMP-photoshop:Country", "IPTC:Country-PrimaryLocationName", "Country")
+        let province = strVal("province", "XMP:State", "XMP-photoshop:State", "IPTC:Province-State", "State", "Province")
+        let city = strVal("city", "XMP:City", "XMP-photoshop:City", "IPTC:City", "City")
+        let district = strVal("district", "XMP:Location", "XMP-iptcCore:Location", "IPTC:Sub-location", "District", "Location")
+        let title = strVal("title", "XMP:Title", "IPTC:ObjectName", "Title")
+        let desc = strVal("description", "XMP:Description", "IPTC:Caption-Abstract", "Description")
+
+        let gpsSource = strVal("gps_source", "XMP-photools:GPSSource", "GPSSource")
+        let gpsMatchMethod = strVal("gps_match_method", "XMP-photools:GPSMatchMethod", "GPSMatchMethod")
+        let interpolateWindow = strVal("interpolate_window", "XMP-photools:InterpolateWindow", "InterpolateWindow")
+        let processor = strVal("processor", "XMP-photools:Processor", "Processor", "XMP:CreatorTool", "CreatorTool")
+        let processedDate = strVal("processed_date", "XMP-photools:ProcessedDate", "ProcessedDate", "XMP:MetadataDate", "MetadataDate")
+        let geocodeSource = strVal("geocode_source")
+        let sidecarPath = strVal("sidecar_path")
+
+        var tags: [ExifTagItem] = []
+        if let rawTagList = dict["raw_tags"] as? [[String: Any]] {
+            for item in rawTagList {
+                let g = item["group"] as? String ?? "General"
+                let t = item["tag"] as? String ?? ""
+                let v = item["value"] as? String ?? ""
+                if !t.isEmpty {
+                    tags.append(ExifTagItem(group: g, tag: t, value: v))
+                }
+            }
+        } else {
+            for (k, v) in dict {
+                if k == "SourceFile" || k == "file_path" || k == "raw_tags" { continue }
+                let parts = k.split(separator: ":", maxSplits: 1)
+                let group = parts.count > 1 ? String(parts[0]) : "General"
+                let tag = parts.count > 1 ? String(parts[1]) : k
+                tags.append(ExifTagItem(group: group, tag: tag, value: "\(v)"))
+            }
+        }
+        tags.sort { ($0.group, $0.tag) < ($1.group, $1.tag) }
+
+        // 通过相机姿态策略中心 (CameraAttitudeRegistry) 解算姿态
+        let attitude = CameraAttitudeRegistry.shared.resolve(from: dict, make: make, model: model)
+
+        // 提取已保存的 3D 视角视距或由策略建议的视距
+        let savedViewDistance = doubleVal(
+            "view_distance",
+            "XMP-photools:ViewDistance",
+            "ViewDistance",
+            "photools:ViewDistance",
+            "XMP:ViewDistance"
+        )
+        let finalViewDistance = savedViewDistance ?? attitude.suggestedDistanceMeters
+
+        let finalImgDir = imgDir ?? attitude.heading
+        let finalImgDirRef = imgDirRef ?? attitude.headingRef
+        let finalPitch = pitch ?? attitude.pitch
+        let finalRoll = roll ?? attitude.roll
+        let finalYaw = yaw ?? attitude.yaw
+        let finalFOV = rawFOV ?? attitude.fov
+
+        return ExifMetadata(
+            filePath: filePath,
+            fileName: fileName,
+            fileSize: fileSize,
+            fileModifyDate: modDate,
+            cameraMake: make,
+            cameraModel: model,
+            lensModel: lens,
+            dateTimeOriginal: date,
+            exposureTime: exposure,
+            fNumber: fNumber,
+            iso: iso,
+            focalLength: focal,
+            exposureProgram: program,
+            latitude: lat,
+            longitude: lon,
+            altitude: alt,
+            gpsPosition: pos,
+            gpsImgDirection: finalImgDir,
+            gpsImgDirectionRef: finalImgDirRef,
+            focalLengthIn35mm: focal35mm,
+            yawAngle: finalYaw,
+            pitchAngle: finalPitch,
+            rollAngle: finalRoll,
+            rawFOV: finalFOV,
+            focusDistance: focusDist,
+            viewDistance: finalViewDistance,
+            country: country,
+            province: province,
+            city: city,
+            district: district,
+            title: title,
+            description: desc,
+            gpsSource: gpsSource,
+            gpsMatchMethod: gpsMatchMethod,
+            interpolateWindow: interpolateWindow,
+            processor: processor,
+            processedDate: processedDate,
+            geocodeSource: geocodeSource,
+            sidecarPath: sidecarPath,
+            cameraAttitude: attitude,
+            rawTags: tags
+        )
+    }
+}

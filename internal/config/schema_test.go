@@ -96,3 +96,47 @@ func TestOptionSpecs_Validation(t *testing.T) {
 		t.Errorf("expected invalid duration to fail validation")
 	}
 }
+
+func TestGlobalSettings_Proxy(t *testing.T) {
+	// 1. 禁用状态
+	g := GlobalSettings{
+		ProxyEnabled: false,
+		ProxyType:    "http",
+		ProxyHost:    "127.0.0.1",
+		ProxyPort:    7890,
+	}
+	if g.ProxyURL() != "" {
+		t.Errorf("expected empty ProxyURL when disabled, got %s", g.ProxyURL())
+	}
+
+	// 2. 启用状态 - HTTP
+	g.ProxyEnabled = true
+	if expected := "http://127.0.0.1:7890"; g.ProxyURL() != expected {
+		t.Errorf("expected %s, got %s", expected, g.ProxyURL())
+	}
+
+	// 3. 启用状态 - SOCKS5
+	g.ProxyType = "socks5"
+	if expected := "socks5://127.0.0.1:7890"; g.ProxyURL() != expected {
+		t.Errorf("expected %s, got %s", expected, g.ProxyURL())
+	}
+
+	// 4. ApplyGlobalProxy 与清除
+	ApplyGlobalProxy(g)
+	// 清除代理
+	g.ProxyEnabled = false
+	ApplyGlobalProxy(g)
+
+	// 5. SessionConfig 保存与同步
+	cfg := DefaultPluginsConfig()
+	sc := NewSessionConfig(&cfg)
+	sc.Global.ProxyEnabled = true
+	sc.Global.ProxyType = "socks5"
+	sc.Global.ProxyHost = "10.0.0.1"
+	sc.Global.ProxyPort = 1080
+
+	sc.ApplyToPluginsConfig(&cfg)
+	if !cfg.Global.ProxyEnabled || cfg.Global.ProxyType != "socks5" || cfg.Global.ProxyHost != "10.0.0.1" || cfg.Global.ProxyPort != 1080 {
+		t.Errorf("expected proxy config synced to PluginsConfig, got %+v", cfg.Global)
+	}
+}

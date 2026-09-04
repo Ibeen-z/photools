@@ -16,6 +16,7 @@ import (
 	"github.com/vincentchyu/photools/internal/engine"
 	"github.com/vincentchyu/photools/internal/exiftool"
 	"github.com/vincentchyu/photools/internal/i18n"
+	"github.com/vincentchyu/photools/internal/logger"
 )
 
 // Phase 代表由相同 Priority 插件组成的并发执行阶段
@@ -426,47 +427,12 @@ func (o *Orchestrator) PlanWithProgress(ctx context.Context, eventCh chan<- doma
 func (o *Orchestrator) Execute(ctx context.Context, eventCh chan<- domain.ProgressEvent) (*domain.TaskSummary, []domain.Issue, error) {
 	startTime := time.Now()
 
-	// 初始化日志文件句柄 (同时写入时间戳日志与 photools_latest.log)
-	var logFiles []*os.File
-	var logFileMu sync.Mutex
-
 	if o.logDir != "" {
-		_ = os.MkdirAll(o.logDir, 0o755)
-		tsLogName := fmt.Sprintf("photools_%s.log", startTime.Format("20060102_150405"))
-		tsLogPath := filepath.Join(o.logDir, tsLogName)
-		latestLogPath := filepath.Join(o.logDir, "photools_latest.log")
-
-		if f1, err := os.OpenFile(tsLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
-			logFiles = append(logFiles, f1)
-		}
-		if f2, err := os.OpenFile(latestLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
-			logFiles = append(logFiles, f2)
-		}
-
-		// 写入执行头部信息
-		headerText := fmt.Sprintf("================================================================================\n"+
-			"%s\n"+
-			i18n.T("logFileHeaderStartTime")+"\n"+
-			i18n.T("logFileHeaderTaskName")+"\n"+
-			i18n.T("logFileHeaderSourceDir")+"\n"+
-			i18n.T("logFileHeaderPhases")+"\n"+
-			"================================================================================\n\n",
-			i18n.T("logFileHeaderTitle"),
-			startTime.Format("2006-01-02 15:04:05"), o.Name(), o.sourceDir, len(o.phases), o.workers)
-
-		for _, f := range logFiles {
-			_, _ = f.WriteString(headerText)
-			_ = f.Sync()
-		}
+		_ = logger.InitPipelineSession(o.logDir, o.Name(), o.sourceDir, len(o.phases), o.workers)
+		defer func() {
+			// 在退出前如果遇到错误，由末尾或此处安全关闭
+		}()
 	}
-
-	defer func() {
-		logFileMu.Lock()
-		defer logFileMu.Unlock()
-		for _, f := range logFiles {
-			_ = f.Close()
-		}
-	}()
 
 	sendEvent := func(e domain.ProgressEvent) {
 		if eventCh != nil {
@@ -475,33 +441,7 @@ func (o *Orchestrator) Execute(ctx context.Context, eventCh chan<- domain.Progre
 			default:
 			}
 		}
-
-		// 实时中文/英文日志流落盘
-		if len(logFiles) > 0 && e.Message != "" {
-			nowStr := time.Now().Format("15:04:05.000")
-			lvlStr := "INFO"
-			switch e.Level {
-			case domain.LevelWarn:
-				lvlStr = "WARN"
-			case domain.LevelError:
-				lvlStr = "ERROR"
-			case domain.LevelSuccess:
-				lvlStr = "SUCC"
-			}
-			stageStr := domain.StageDisplayName(e.Stage)
-			if stageStr == "" {
-				stageStr = domain.StageDisplayName(domain.StagePrecheck)
-			}
-
-			line := fmt.Sprintf("[%s] [%-5s] [%s] %s\n", nowStr, lvlStr, stageStr, e.Message)
-
-			logFileMu.Lock()
-			for _, f := range logFiles {
-				_, _ = f.WriteString(line)
-				_ = f.Sync()
-			}
-			logFileMu.Unlock()
-		}
+		logger.LogEvent(e)
 	}
 
 	if o.lockPath != "" {
@@ -804,35 +744,8 @@ func (o *Orchestrator) Execute(ctx context.Context, eventCh chan<- domain.Progre
 		Message: summaryMsg,
 	})
 
-	// 写入日志文件结算尾部
-	if len(logFiles) > 0 {
-		var footer strings.Builder
-		footer.WriteString("\n================================================================================\n")
-		footer.WriteString(i18n.T("logFileFooterTitle") + "\n")
-		footer.WriteString(fmt.Sprintf(i18n.T("logFileFooterEndTime")+"\n", time.Now().Format("2006-01-02 15:04:05"), totalDur))
-		footer.WriteString(fmt.Sprintf(i18n.T("logFileFooterTotal")+"\n", summary.TotalAssets))
-		footer.WriteString(fmt.Sprintf(i18n.T("logFileFooterSuccess")+"\n", summary.Success))
-		footer.WriteString(fmt.Sprintf(i18n.T("logFileFooterPending")+"\n", summary.Pending))
-		footer.WriteString(fmt.Sprintf(i18n.T("logFileFooterFailed")+"\n", summary.Failed))
-
-		if len(issues) > 0 {
-			footer.WriteString(i18n.T("logFileFooterIssuesHeader"))
-			for i, iss := range issues {
-				footer.WriteString(fmt.Sprintf(i18n.T("logFileFooterIssueItem"),
-					i+1, iss.Asset.DisplayName(), iss.FailedStage, iss.Reason, iss.Suggestion))
-			}
-		} else {
-			footer.WriteString(i18n.T("logFileFooterAllSuccess"))
-		}
-		footer.WriteString("================================================================================\n")
-
-		footerStr := footer.String()
-		logFileMu.Lock()
-		for _, f := range logFiles {
-			_, _ = f.WriteString(footerStr)
-			_ = f.Sync()
-		}
-		logFileMu.Unlock()
+	if o.logDir != "" {
+		logger.ClosePipelineSession(summary, issues)
 	}
 
 	return summary, issues, nil

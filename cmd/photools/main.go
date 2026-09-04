@@ -226,14 +226,23 @@ func runGeotag(defaultBaseDir string) {
 	flatMode := fs.Bool("flat", sessionCfg.Global.FlatMode, i18n.T("cliOptFlat"))
 	sidecarPolicy := fs.String("sidecar-policy", sessionCfg.Global.SidecarPolicy, i18n.T("cliOptSidecarPolicy"))
 	sidecarOnly := fs.Bool("sidecar-only", sessionCfg.Global.SidecarOnly, i18n.T("cliOptSidecarOnly"))
-	companionExts := fs.String("companion-exts", strings.Join(sessionCfg.Global.CompanionExtensions, ","), i18n.T("cliOptCompanionExts"))
-	inPlace := fs.Bool("in-place", sessionCfg.GetBoolOption(domain.CapDateArchive, "in_place", false), i18n.T("cliOptInPlace"))
-	geosync := fs.String("geosync", sessionCfg.GetStringOption(domain.CapGPXMatching, "geosync", "0"), i18n.T("cliOptGeosync"))
+	companionExts := fs.String(
+		"companion-exts", strings.Join(sessionCfg.Global.CompanionExtensions, ","), i18n.T("cliOptCompanionExts"),
+	)
+	inPlace := fs.Bool(
+		"in-place", sessionCfg.GetBoolOption(domain.CapDateArchive, "in_place", false), i18n.T("cliOptInPlace"),
+	)
+	geosync := fs.String(
+		"geosync", sessionCfg.GetStringOption(domain.CapGPXMatching, "geosync", "0"), i18n.T("cliOptGeosync"),
+	)
 	rawExts := fs.String("raw-exts", strings.Join(sessionCfg.Global.RawExtensions, ","), i18n.T("cliOptRawExts"))
 	workers := fs.Int("workers", sessionCfg.Global.Workers, i18n.T("cliOptWorkers"))
 	enableGeocode := fs.Bool("geocode", true, i18n.T("cliOptEnableGeocode"))
 	enableInterpolate := fs.Bool("interpolate", false, i18n.T("cliOptInterpolate"))
-	interpolateWindow := fs.String("interpolate-window", sessionCfg.GetStringOption(domain.CapGPSInterpolate, "window", "15m"), i18n.T("cliOptInterpolateWindow"))
+	interpolateWindow := fs.String(
+		"interpolate-window", sessionCfg.GetStringOption(domain.CapGPSInterpolate, "window", "15m"),
+		i18n.T("cliOptInterpolateWindow"),
+	)
 	allowNoGPS := fs.Bool("allow-no-gps", sessionCfg.Global.AllowNoGPS, i18n.T("cliOptAllowNoGps"))
 	isTest := fs.Bool("test", sessionCfg.Global.TestBackup, i18n.T("cliOptTestBackup"))
 	isBackup := fs.Bool("backup", false, i18n.T("cliOptTestBackup"))
@@ -241,6 +250,11 @@ func runGeotag(defaultBaseDir string) {
 	logDir := fs.String("log-dir", sessionCfg.Global.LogDir, i18n.T("cliOptLogDir"))
 
 	_ = fs.Parse(normalizeBoolFlags(fs, os.Args[2:]))
+	if !flagWasProvided(
+		fs, "processed-dir",
+	) && !*flatMode && filepath.Clean(*sourceDir) != filepath.Join(filepath.Clean(*baseDir), "Inbox") {
+		*processedDir = filepath.Join(*sourceDir, "Processed")
+	}
 
 	win, _ := time.ParseDuration(*interpolateWindow)
 	if win <= 0 {
@@ -252,36 +266,41 @@ func runGeotag(defaultBaseDir string) {
 		finalPolicy = string(domain.PolicySidecarOnly)
 	}
 
-	applySessionOverrides(sessionCfg, *baseDir, *sourceDir, *gpxDir, *processedDir, *logDir, *flatMode, finalPolicy, *allowNoGPS, *workers, *rawExts, *companionExts, map[domain.CapabilityID]map[string]any{
-		domain.CapGPSInterpolate: {"window": *interpolateWindow},
-		domain.CapGPXMatching:    {"geosync": *geosync},
-		domain.CapDateArchive:    {"in_place": *inPlace},
-	})
+	applySessionOverrides(
+		sessionCfg, *baseDir, *sourceDir, *gpxDir, *processedDir, *logDir, *flatMode, finalPolicy, *allowNoGPS,
+		*workers, *rawExts, *companionExts, map[domain.CapabilityID]map[string]any{
+			domain.CapGPSInterpolate: {"window": *interpolateWindow},
+			domain.CapGPXMatching:    {"geosync": *geosync},
+			domain.CapDateArchive:    {"in_place": *inPlace},
+		},
+	)
 
-	task, err := pipeline.Build(pipeline.PipelineOptions{
-		BaseDir:             *baseDir,
-		SourceDir:           *sourceDir,
-		GPXDir:              *gpxDir,
-		ProcessedDir:        *processedDir,
-		LogDir:              *logDir,
-		FlatMode:            *flatMode,
-		SidecarPolicy:       finalPolicy,
-		SidecarOnly:         finalPolicy == string(domain.PolicySidecarOnly),
-		CompanionExtensions: sessionCfg.Global.CompanionExtensions,
-		InPlaceArchive:      *inPlace,
-		Geosync:             *geosync,
-		RawExtensions:       sessionCfg.Global.RawExtensions,
-		Workers:             *workers,
-		EnableGPXMatch:      true,
-		EnableInterpolate:   *enableInterpolate,
-		InterpolateWindow:   win,
-		EnableGeocode:       *enableGeocode,
-		AllowNoGPS:          *allowNoGPS,
-		EnableArchive:       true,
-		EnableBackup:        *isTest || *isBackup,
-		BackupDir:           *backupDir,
-		Session:             sessionCfg,
-	})
+	task, err := pipeline.Build(
+		pipeline.PipelineOptions{
+			BaseDir:             *baseDir,
+			SourceDir:           *sourceDir,
+			GPXDir:              *gpxDir,
+			ProcessedDir:        *processedDir,
+			LogDir:              *logDir,
+			FlatMode:            *flatMode,
+			SidecarPolicy:       finalPolicy,
+			SidecarOnly:         finalPolicy == string(domain.PolicySidecarOnly),
+			CompanionExtensions: sessionCfg.Global.CompanionExtensions,
+			InPlaceArchive:      *inPlace,
+			Geosync:             *geosync,
+			RawExtensions:       sessionCfg.Global.RawExtensions,
+			Workers:             *workers,
+			EnableGPXMatch:      true,
+			EnableInterpolate:   *enableInterpolate,
+			InterpolateWindow:   win,
+			EnableGeocode:       *enableGeocode,
+			AllowNoGPS:          *allowNoGPS,
+			EnableArchive:       true,
+			EnableBackup:        *isTest || *isBackup,
+			BackupDir:           *backupDir,
+			Session:             sessionCfg,
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化失败: %v\n", err)
 		exitApp(1)
@@ -301,7 +320,9 @@ func runGeocode(defaultBaseDir string) {
 	flatMode := fs.Bool("flat", sessionCfg.Global.FlatMode, i18n.T("cliOptFlat"))
 	sidecarPolicy := fs.String("sidecar-policy", sessionCfg.Global.SidecarPolicy, i18n.T("cliOptSidecarPolicy"))
 	sidecarOnly := fs.Bool("sidecar-only", sessionCfg.Global.SidecarOnly, i18n.T("cliOptSidecarOnly"))
-	companionExts := fs.String("companion-exts", strings.Join(sessionCfg.Global.CompanionExtensions, ","), i18n.T("cliOptCompanionExts"))
+	companionExts := fs.String(
+		"companion-exts", strings.Join(sessionCfg.Global.CompanionExtensions, ","), i18n.T("cliOptCompanionExts"),
+	)
 	rawExts := fs.String("raw-exts", strings.Join(sessionCfg.Global.RawExtensions, ","), i18n.T("cliOptRawExts"))
 	workers := fs.Int("workers", sessionCfg.Global.Workers, i18n.T("cliOptWorkers"))
 	allowNoGPS := fs.Bool("allow-no-gps", sessionCfg.Global.AllowNoGPS, i18n.T("cliOptAllowNoGps"))
@@ -335,22 +356,24 @@ func runGeocode(defaultBaseDir string) {
 		sessionCfg.Global.LogDir = *logDir
 	}
 
-	task, err := pipeline.Build(pipeline.PipelineOptions{
-		BaseDir:             *baseDir,
-		SourceDir:           targetDir,
-		LogDir:              *logDir,
-		FlatMode:            *flatMode,
-		SidecarPolicy:       finalPolicy,
-		SidecarOnly:         finalPolicy == string(domain.PolicySidecarOnly),
-		CompanionExtensions: sessionCfg.Global.CompanionExtensions,
-		EnableGeocode:       true,
-		AllowNoGPS:          *allowNoGPS,
-		RawExtensions:       sessionCfg.Global.RawExtensions,
-		Workers:             *workers,
-		EnableBackup:        *isTest || *isBackup,
-		BackupDir:           *backupDir,
-		Session:             sessionCfg,
-	})
+	task, err := pipeline.Build(
+		pipeline.PipelineOptions{
+			BaseDir:             *baseDir,
+			SourceDir:           targetDir,
+			LogDir:              *logDir,
+			FlatMode:            *flatMode,
+			SidecarPolicy:       finalPolicy,
+			SidecarOnly:         finalPolicy == string(domain.PolicySidecarOnly),
+			CompanionExtensions: sessionCfg.Global.CompanionExtensions,
+			EnableGeocode:       true,
+			AllowNoGPS:          *allowNoGPS,
+			RawExtensions:       sessionCfg.Global.RawExtensions,
+			Workers:             *workers,
+			EnableBackup:        *isTest || *isBackup,
+			BackupDir:           *backupDir,
+			Session:             sessionCfg,
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化失败: %v\n", err)
 		exitApp(1)
@@ -371,15 +394,24 @@ func runPipeline(defaultBaseDir string) {
 	flatMode := fs.Bool("flat", sessionCfg.Global.FlatMode, i18n.T("cliOptFlat"))
 	sidecarPolicy := fs.String("sidecar-policy", sessionCfg.Global.SidecarPolicy, i18n.T("cliOptSidecarPolicy"))
 	sidecarOnly := fs.Bool("sidecar-only", sessionCfg.Global.SidecarOnly, i18n.T("cliOptSidecarOnly"))
-	companionExts := fs.String("companion-exts", strings.Join(sessionCfg.Global.CompanionExtensions, ","), i18n.T("cliOptCompanionExts"))
-	inPlace := fs.Bool("in-place", sessionCfg.GetBoolOption(domain.CapDateArchive, "in_place", false), i18n.T("cliOptInPlace"))
-	geosync := fs.String("geosync", sessionCfg.GetStringOption(domain.CapGPXMatching, "geosync", "0"), i18n.T("cliOptGeosync"))
+	companionExts := fs.String(
+		"companion-exts", strings.Join(sessionCfg.Global.CompanionExtensions, ","), i18n.T("cliOptCompanionExts"),
+	)
+	inPlace := fs.Bool(
+		"in-place", sessionCfg.GetBoolOption(domain.CapDateArchive, "in_place", false), i18n.T("cliOptInPlace"),
+	)
+	geosync := fs.String(
+		"geosync", sessionCfg.GetStringOption(domain.CapGPXMatching, "geosync", "0"), i18n.T("cliOptGeosync"),
+	)
 	rawExts := fs.String("raw-exts", strings.Join(sessionCfg.Global.RawExtensions, ","), i18n.T("cliOptRawExts"))
 	workers := fs.Int("workers", sessionCfg.Global.Workers, i18n.T("cliOptWorkers"))
 
 	enableGPX := fs.Bool("gpx", true, i18n.T("cliOptEnableGpx"))
 	enableInterpolate := fs.Bool("interpolate", false, i18n.T("cliOptInterpolate"))
-	interpolateWindow := fs.String("interpolate-window", sessionCfg.GetStringOption(domain.CapGPSInterpolate, "window", "15m"), i18n.T("cliOptInterpolateWindow"))
+	interpolateWindow := fs.String(
+		"interpolate-window", sessionCfg.GetStringOption(domain.CapGPSInterpolate, "window", "15m"),
+		i18n.T("cliOptInterpolateWindow"),
+	)
 	enableGeocode := fs.Bool("geocode", true, i18n.T("cliOptEnableGeocode"))
 	allowNoGPS := fs.Bool("allow-no-gps", sessionCfg.Global.AllowNoGPS, i18n.T("cliOptAllowNoGps"))
 	enableArchive := fs.Bool("archive", true, i18n.T("cliOptEnableArchive"))
@@ -389,6 +421,11 @@ func runPipeline(defaultBaseDir string) {
 	logDir := fs.String("log-dir", sessionCfg.Global.LogDir, i18n.T("cliOptLogDir"))
 
 	_ = fs.Parse(normalizeBoolFlags(fs, os.Args[2:]))
+	if !flagWasProvided(
+		fs, "processed-dir",
+	) && !*flatMode && filepath.Clean(*sourceDir) != filepath.Join(filepath.Clean(*baseDir), "Inbox") {
+		*processedDir = filepath.Join(*sourceDir, "Processed")
+	}
 
 	win, _ := time.ParseDuration(*interpolateWindow)
 	if win <= 0 {
@@ -400,36 +437,41 @@ func runPipeline(defaultBaseDir string) {
 		finalPolicy = string(domain.PolicySidecarOnly)
 	}
 
-	applySessionOverrides(sessionCfg, *baseDir, *sourceDir, *gpxDir, *processedDir, *logDir, *flatMode, finalPolicy, *allowNoGPS, *workers, *rawExts, *companionExts, map[domain.CapabilityID]map[string]any{
-		domain.CapGPSInterpolate: {"window": *interpolateWindow},
-		domain.CapGPXMatching:    {"geosync": *geosync},
-		domain.CapDateArchive:    {"in_place": *inPlace},
-	})
+	applySessionOverrides(
+		sessionCfg, *baseDir, *sourceDir, *gpxDir, *processedDir, *logDir, *flatMode, finalPolicy, *allowNoGPS,
+		*workers, *rawExts, *companionExts, map[domain.CapabilityID]map[string]any{
+			domain.CapGPSInterpolate: {"window": *interpolateWindow},
+			domain.CapGPXMatching:    {"geosync": *geosync},
+			domain.CapDateArchive:    {"in_place": *inPlace},
+		},
+	)
 
-	task, err := pipeline.Build(pipeline.PipelineOptions{
-		BaseDir:             *baseDir,
-		SourceDir:           *sourceDir,
-		GPXDir:              *gpxDir,
-		ProcessedDir:        *processedDir,
-		LogDir:              *logDir,
-		FlatMode:            *flatMode,
-		SidecarPolicy:       finalPolicy,
-		SidecarOnly:         finalPolicy == string(domain.PolicySidecarOnly),
-		CompanionExtensions: sessionCfg.Global.CompanionExtensions,
-		InPlaceArchive:      *inPlace,
-		Geosync:             *geosync,
-		RawExtensions:       sessionCfg.Global.RawExtensions,
-		Workers:             *workers,
-		EnableGPXMatch:      *enableGPX,
-		EnableInterpolate:   *enableInterpolate,
-		InterpolateWindow:   win,
-		EnableGeocode:       *enableGeocode,
-		AllowNoGPS:          *allowNoGPS,
-		EnableArchive:       *enableArchive,
-		EnableBackup:        *isTest || *isBackup,
-		BackupDir:           *backupDir,
-		Session:             sessionCfg,
-	})
+	task, err := pipeline.Build(
+		pipeline.PipelineOptions{
+			BaseDir:             *baseDir,
+			SourceDir:           *sourceDir,
+			GPXDir:              *gpxDir,
+			ProcessedDir:        *processedDir,
+			LogDir:              *logDir,
+			FlatMode:            *flatMode,
+			SidecarPolicy:       finalPolicy,
+			SidecarOnly:         finalPolicy == string(domain.PolicySidecarOnly),
+			CompanionExtensions: sessionCfg.Global.CompanionExtensions,
+			InPlaceArchive:      *inPlace,
+			Geosync:             *geosync,
+			RawExtensions:       sessionCfg.Global.RawExtensions,
+			Workers:             *workers,
+			EnableGPXMatch:      *enableGPX,
+			EnableInterpolate:   *enableInterpolate,
+			InterpolateWindow:   win,
+			EnableGeocode:       *enableGeocode,
+			AllowNoGPS:          *allowNoGPS,
+			EnableArchive:       *enableArchive,
+			EnableBackup:        *isTest || *isBackup,
+			BackupDir:           *backupDir,
+			Session:             sessionCfg,
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化流水线失败: %v\n", err)
 		exitApp(1)
@@ -472,7 +514,10 @@ func runTaskWithEvents(task domain.Task, customLogDir ...string) {
 	fmt.Printf("📄 实时中文执行日志流已完整保存在: %s\n", filepath.Join(targetLogDir, common.LogFileNameLatest))
 
 	if summary != nil && summary.Failed > 0 {
-		fmt.Fprintf(os.Stderr, "完成时发现 %d 项失败，详情见报告文件 %s\n", len(issues), filepath.Join(targetLogDir, common.PendingReportFileNameLatest))
+		fmt.Fprintf(
+			os.Stderr, "完成时发现 %d 项失败，详情见报告文件 %s\n", len(issues),
+			filepath.Join(targetLogDir, common.PendingReportFileNameLatest),
+		)
 		exitApp(1)
 	}
 }
@@ -509,18 +554,20 @@ func runOrganizeByDate() {
 		sessionCfg.Global.LogDir = *logDir
 	}
 
-	task, err := pipeline.Build(pipeline.PipelineOptions{
-		BaseDir:       *baseDir,
-		SourceDir:     *sourceDir,
-		ProcessedDir:  *targetDir,
-		LogDir:        *logDir,
-		RawExtensions: sessionCfg.Global.RawExtensions,
-		Workers:       *workers,
-		EnableArchive: true,
-		EnableBackup:  *isTest || *isBackup,
-		BackupDir:     *backupDir,
-		Session:       sessionCfg,
-	})
+	task, err := pipeline.Build(
+		pipeline.PipelineOptions{
+			BaseDir:       *baseDir,
+			SourceDir:     *sourceDir,
+			ProcessedDir:  *targetDir,
+			LogDir:        *logDir,
+			RawExtensions: sessionCfg.Global.RawExtensions,
+			Workers:       *workers,
+			EnableArchive: true,
+			EnableBackup:  *isTest || *isBackup,
+			BackupDir:     *backupDir,
+			Session:       sessionCfg,
+		},
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化失败: %v\n", err)
 		exitApp(1)
@@ -626,9 +673,11 @@ func runCompletion(args []string) {
 
 func parseExtensions(s string) []string {
 	// 支持逗号与空格切分
-	fields := strings.FieldsFunc(s, func(r rune) bool {
-		return r == ',' || r == ' ' || r == ';'
-	})
+	fields := strings.FieldsFunc(
+		s, func(r rune) bool {
+			return r == ',' || r == ' ' || r == ';'
+		},
+	)
 	var res []string
 	for _, p := range fields {
 		c := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(p)), ".")
@@ -637,6 +686,16 @@ func parseExtensions(s string) []string {
 		}
 	}
 	return res
+}
+
+func flagWasProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(
+		func(flag *flag.Flag) {
+			provided = provided || flag.Name == name
+		},
+	)
+	return provided
 }
 
 func applySessionOverrides(
@@ -731,7 +790,9 @@ func runGeoData(args []string) {
 			if item.Installed {
 				status = fmt.Sprintf("✅ 已安装 (%d 点位, %.1f MB)", item.Points, float64(item.FileSize)/(1024*1024))
 			}
-			fmt.Printf("  • %-15s [%s]: %s\n    └─ %s\n", item.Meta.Code, item.Meta.NameZH, status, item.Meta.Description)
+			fmt.Printf(
+				"  • %-15s [%s]: %s\n    └─ %s\n", item.Meta.Code, item.Meta.NameZH, status, item.Meta.Description,
+			)
 		}
 	case "install", "get", "download":
 		if len(args) < 2 {
@@ -760,21 +821,28 @@ func runGeoData(args []string) {
 	case "info", "status":
 		rg := geocoding.GetDefault()
 		fmt.Println("🔍 正在扫描并装载本地离线地理库索引...")
-		_ = rg.InitProgressive(context.Background(), func(stage string, percent float64, msg string, status geocoding.HealthStatus, err error) {
-			if percent >= 0 {
-				fmt.Printf("  • [%s] %s (%.0f%%)\n", stage, msg, percent*100)
-			} else {
-				fmt.Printf("  • [%s] %s\n", stage, msg)
-			}
-		})
+		_ = rg.InitProgressive(
+			context.Background(),
+			func(stage string, percent float64, msg string, status geocoding.HealthStatus, err error) {
+				if percent >= 0 {
+					fmt.Printf("  • [%s] %s (%.0f%%)\n", stage, msg, percent*100)
+				} else {
+					fmt.Printf("  • [%s] %s\n", stage, msg)
+				}
+			},
+		)
 		stats := rg.GetStats()
 		fmt.Printf("\n📊 【当前离线地理空间索引库统计】\n")
-		fmt.Printf("  • 离线库总点数:   %d 个 (内置: %d, 用户自定义: %d)\n",
-			stats.TotalPoints, stats.BuiltinPoints, stats.CustomPoints)
+		fmt.Printf(
+			"  • 离线库总点数:   %d 个 (内置: %d, 用户自定义: %d)\n",
+			stats.TotalPoints, stats.BuiltinPoints, stats.CustomPoints,
+		)
 		fmt.Printf("  • 已载入大洲包:   %d 个\n", len(stats.Packs))
 		for _, pk := range stats.Packs {
-			fmt.Printf("    - %-20s: %6d 点位 (%.1f MB, 加载 %.2fms)\n",
-				pk.Name, pk.Points, float64(pk.SizeBytes)/(1024*1024), float64(pk.LoadTime.Microseconds())/1000.0)
+			fmt.Printf(
+				"    - %-20s: %6d 点位 (%.1f MB, 加载 %.2fms)\n",
+				pk.Name, pk.Points, float64(pk.SizeBytes)/(1024*1024), float64(pk.LoadTime.Microseconds())/1000.0,
+			)
 		}
 		fmt.Printf("  • KD-Tree建树耗时: %.2f ms\n", float64(stats.TreeBuildTime.Microseconds())/1000.0)
 		fmt.Printf("  • 全量初始化耗时:  %.2f ms\n", float64(stats.TotalInitTime.Microseconds())/1000.0)
@@ -810,13 +878,16 @@ func runGeoDataTestCoordinates(lat, lon, alt float64, debug bool) {
 	rg := geocoding.GetDefault()
 	if !rg.IsInitialized() {
 		fmt.Println("⚙️  检测到首次冷启动，正在装载离线高精地理空间索引...")
-		_ = rg.InitProgressive(context.Background(), func(stage string, percent float64, msg string, status geocoding.HealthStatus, err error) {
-			if percent >= 0 {
-				fmt.Printf("  • [%s] %s (%.0f%%)\n", stage, msg, percent*100)
-			} else {
-				fmt.Printf("  • [%s] %s\n", stage, msg)
-			}
-		})
+		_ = rg.InitProgressive(
+			context.Background(),
+			func(stage string, percent float64, msg string, status geocoding.HealthStatus, err error) {
+				if percent >= 0 {
+					fmt.Printf("  • [%s] %s (%.0f%%)\n", stage, msg, percent*100)
+				} else {
+					fmt.Printf("  • [%s] %s\n", stage, msg)
+				}
+			},
+		)
 		fmt.Println()
 	}
 

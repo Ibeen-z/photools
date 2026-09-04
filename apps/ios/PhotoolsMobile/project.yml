@@ -1,0 +1,73 @@
+name: PhotoolsMobile
+options:
+  bundleIdPrefix: com.vincentchyu.photools
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ""
+
+packages:
+  PhotoolsMobileCore:
+    path: .
+
+schemes:
+  PhotoolsMobile:
+    build:
+      targets:
+        PhotoolsMobile: all
+    run:
+      config: Debug
+
+targets:
+  PhotoolsMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: App
+    dependencies:
+      - package: PhotoolsMobileCore
+        product: PhotoolsMobileCore
+    preBuildScripts:
+      - name: "Auto Extract Camera Credentials"
+        script: |
+          PKLG_FILE="${PROJECT_DIR}/tools/captures/extract_pklg_credentials.pklg"
+          SCRIPT_FILE="${PROJECT_DIR}/tools/extract_pklg_credentials.py"
+          if [ -f "$PKLG_FILE" ] && [ -f "$SCRIPT_FILE" ]; then
+              echo "🔍 [Photools] 检测到抓包凭据，正在自动提取并同步 camera_credentials.json..."
+              python3 "$SCRIPT_FILE" "$PKLG_FILE" --update-config
+          fi
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: "Photools Mobile"
+        CFBundleDevelopmentRegion: "zh_CN"
+        UIBackgroundModes:
+          - bluetooth-central
+          - location
+          - fetch
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSBluetoothAlwaysUsageDescription: "需要使用蓝牙连接尼康相机（Z 系列等）以持续同步地理坐标和时钟信息。"
+        NSBluetoothPeripheralUsageDescription: "需要使用蓝牙与尼康相机完成智能设备认证与数据传输。"
+        NSLocationAlwaysAndWhenInUseUsageDescription: "拍摄期间手机放入口袋或锁屏息屏时，必须「始终允许」定位以向尼康相机持续注入高精度拍摄经纬度与海拔。"
+        NSLocationWhenInUseUsageDescription: "需要位置权限以获取当前的 WGS-84 经纬度和海拔信息并同步至相机。"
+        NSLocationAlwaysUsageDescription: "拍摄期间手机放入口袋或锁屏息屏时，必须「始终允许」定位以向尼康相机持续注入高精度拍摄经纬度与海拔。"
+        NSLocationTemporaryUsageDescriptionDictionary:
+          NikonHighAccuracyGPS: "尼康微单/单反照片 EXIF 需要精准 GPS 物理坐标，请允许精确位置。"
+        NSMotionUsageDescription: "需要访问运动与健身传感器，以智能识别您的徒步、乘车或静止状态，在您原地休整时自动降低传感器与蓝牙功耗，延长相机与手机电池续航。"
+        UILaunchScreen: { }
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.vincentchyu.photools.mobile
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

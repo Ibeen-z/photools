@@ -98,6 +98,9 @@ func Build(opts PipelineOptions) (domain.Task, error) {
 	if processedDir == "" {
 		if opts.FlatMode {
 			processedDir = sourceDir
+		} else if filepath.Clean(sourceDir) != filepath.Join(baseDir, "Inbox") {
+			// 直接扫描任意目录时，归档留在该目录内，避免意外跨目录移动。
+			processedDir = filepath.Join(sourceDir, "Processed")
 		} else {
 			processedDir = filepath.Join(baseDir, "Processed")
 		}
@@ -222,7 +225,7 @@ func Build(opts PipelineOptions) (domain.Task, error) {
 		if opt, ok := session.Plugins[domain.CapDateArchive]; ok && opt.Priority > 0 {
 			p = opt.Priority
 		}
-		inPlace := opts.InPlaceArchive || (opts.FlatMode && opts.SourceDir == opts.ProcessedDir)
+		inPlace := opts.InPlaceArchive || (opts.FlatMode && sourceDir == processedDir)
 		cap3 := datearchive.NewCapability(datearchive.Config{
 			Runner:         runner,
 			Archiver:       engine.NewArchiver(opts.NamingTemplate),

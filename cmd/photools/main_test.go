@@ -43,6 +43,21 @@ func TestNormalizeBoolFlags(t *testing.T) {
 	}
 }
 
+func TestFlagWasProvided(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	_ = fs.String("processed-dir", "", "processed dir")
+	_ = fs.String("source-dir", "", "source dir")
+	if err := fs.Parse([]string{"--source-dir", "/tmp/photos"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if flagWasProvided(fs, "processed-dir") {
+		t.Fatal("processed-dir should not be marked as explicitly provided")
+	}
+	if !flagWasProvided(fs, "source-dir") {
+		t.Fatal("source-dir should be marked as explicitly provided")
+	}
+}
+
 func TestParseCoordinatesWithDebug(t *testing.T) {
 	lat, lon, alt, debug, err := parseCoordinatesWithDebug([]string{"31.23", "121.47", "10", "--debug"})
 	if err != nil {

@@ -91,12 +91,21 @@ type PipelineOptionsJSON struct {
 	BackupDir           string `json:"backup_dir"`
 	LogDir              string `json:"log_dir"`
 	Language            string `json:"language"`
+	ProxyEnabled        bool   `json:"proxy_enabled"`
+	ProxyType           string `json:"proxy_type"`
+	ProxyHost           string `json:"proxy_host"`
+	ProxyPort           int    `json:"proxy_port"`
 }
 
 //export Photools_Init
 func Photools_Init(cb C.Photools_InitCallback) {
 	initOnce.Do(
 		func() {
+			// 加载用户全局配置并初始化网络代理设置
+			if pCfg, _ := config.LoadPluginsConfig(""); pCfg != nil {
+				config.ApplyGlobalProxy(pCfg.Global)
+			}
+
 			// 启动并发初始化四大能力插件与离线地理空间索引
 			runner := exiftool.DefaultRunner()
 			caps := []domain.Capability{
@@ -535,6 +544,61 @@ func Photools_InspectPhotoMetadata(filePath *C.char) *C.char {
 	return C.CString(string(data))
 }
 
+// BatchPhotoIndexItem 封装轻量级极速元数据索引项
+type BatchPhotoIndexItem struct {
+	DateTimeOriginal   string `json:"date_time_original,omitempty"`
+	OffsetTimeOriginal string `json:"offset_time_original,omitempty"`
+	HasGPS             bool   `json:"has_gps"`
+	GPSPosition        string `json:"gps_position,omitempty"`
+}
+
+//export Photools_ReadBatchPhotoIndex
+func Photools_ReadBatchPhotoIndex(pathsJSON *C.char) *C.char {
+	raw := C.GoString(pathsJSON)
+	if raw == "" {
+		return C.CString("{}")
+	}
+	var paths []string
+	if err := json.Unmarshal([]byte(raw), &paths); err != nil || len(paths) == 0 {
+		return C.CString("{}")
+	}
+
+	metaMap, err := exiftool.ReadBatchMetadataMapConcurrent(exiftool.DefaultRunner(), paths, 8, nil)
+	if err != nil && len(metaMap) == 0 {
+		return C.CString("{}")
+	}
+
+	result := make(map[string]BatchPhotoIndexItem, len(paths))
+	for _, p := range paths {
+		cleanP := filepath.Clean(p)
+		meta, found := metaMap[cleanP]
+		if !found {
+			if abs, err := filepath.Abs(p); err == nil {
+				meta, found = metaMap[abs]
+			}
+		}
+		if found {
+			result[p] = BatchPhotoIndexItem{
+				DateTimeOriginal:   meta.DateTimeOriginal,
+				OffsetTimeOriginal: meta.OffsetTimeOriginal,
+				HasGPS:             meta.HasGPS(),
+				GPSPosition:        meta.GPSPosition,
+			}
+		} else {
+			result[p] = BatchPhotoIndexItem{
+				HasGPS: false,
+			}
+		}
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return C.CString("{}")
+	}
+
+	return C.CString(string(data))
+}
+
 var (
 	lastErrMu  sync.Mutex
 	lastErrMsg string
@@ -597,6 +661,94 @@ func Photools_WritePhotoGPSMetadata(
 
 	err := exiftool.WritePhotoGPSDirectly(runner, sPath, tPath, float64(lat), float64(lon), float64(alt), prov, policy)
 	if err != nil {
+		setLastError(err)
+		return -1
+	}
+	setLastError(nil)
+	return 0
+}
+
+// Photools_WriteImgDirection 🌟 镜头朝向写入 C-ABI 导出接口
+// primaryPath:   照片主文件路径（NEF/JPG），Go 端自动探测资产组与伴随 XMP
+// sidecarPolicy: 侧车策略字符串（smart/sidecar_only/embed_and_sidecar/embed_only），传 "" 默认 smart
+// degrees:       绝对真北方位角（0~359.9999，T 参考系，GPSImgDirectionRef=T）
+// 返回值: 0=成功, -1=失败（调用 Photools_GetLastErrorMessage 获取错误详情）
+//
+//export Photools_WriteImgDirection
+func Photools_WriteImgDirection(primaryPath, sidecarPolicy *C.char, degrees C.double) C.int {
+	if primaryPath == nil {
+		setLastError(errors.New("primaryPath 不能为空"))
+		return -1
+	}
+	pPath := C.GoString(primaryPath)
+	if pPath == "" {
+		setLastError(errors.New("primaryPath 不能为空"))
+		return -1
+	}
+
+	policyStr := "smart"
+	if sidecarPolicy != nil {
+		if s := C.GoString(sidecarPolicy); s != "" {
+			policyStr = s
+		}
+	}
+
+	policy := domain.NormalizePolicy(policyStr)
+	runner := exiftool.DefaultRunner()
+
+	if err := exiftool.WriteImgDirectionDirectly(runner, pPath, float64(degrees), policy); err != nil {
+		setLastError(err)
+		return -1
+	}
+	setLastError(nil)
+	return 0
+}
+
+// Photools_WriteCameraPerspective 🌟 完整 3D 摄影视角写入 C-ABI 导出接口
+// 包含真北航向角、俯仰角、横滚角、视锥视距与溯源时间戳
+// primaryPath:   照片主文件路径（NEF/JPG）
+// sidecarPolicy: 侧车策略字符串（smart/sidecar_only/embed_and_sidecar/embed_only）
+// heading:       真北航向角 (0~359.9999°)
+// pitch:         俯仰角 (-90° ~ +90°，平视0，抬头正，俯视负)
+// roll:          横滚角 (-180° ~ +180°，机内水平仪)
+// viewDistance:  视锥视距 (米，如 7200.0)
+//
+//export Photools_WriteCameraPerspective
+func Photools_WriteCameraPerspective(
+	primaryPath, sidecarPolicy *C.char,
+	heading, pitch, roll, viewDistance C.double,
+) C.int {
+	if primaryPath == nil {
+		setLastError(errors.New("primaryPath 不能为空"))
+		return -1
+	}
+	pPath := C.GoString(primaryPath)
+	if pPath == "" {
+		setLastError(errors.New("primaryPath 不能为空"))
+		return -1
+	}
+
+	policyStr := "smart"
+	if sidecarPolicy != nil {
+		if s := C.GoString(sidecarPolicy); s != "" {
+			policyStr = s
+		}
+	}
+
+	policy := domain.NormalizePolicy(policyStr)
+	runner := exiftool.DefaultRunner()
+
+	payload := exiftool.CameraPerspectivePayload{
+		Heading:      float64(heading),
+		Pitch:        float64(pitch),
+		Roll:         float64(roll),
+		ViewDistance: float64(viewDistance),
+		Provenance: domain.GPSProvenance{
+			Processor: "Manual3DMap",
+		},
+	}
+
+	if err := exiftool.WriteCameraPerspectiveDirectly(runner, pPath, payload, policy); err != nil {
 		setLastError(err)
 		return -1
 	}
@@ -685,6 +837,17 @@ func Photools_SavePreferences(optionsJSON *C.char) C.int {
 	if opts.Workers > 0 {
 		sessionCfg.Global.Workers = opts.Workers
 	}
+	sessionCfg.Global.ProxyEnabled = opts.ProxyEnabled
+	if opts.ProxyType != "" {
+		sessionCfg.Global.ProxyType = opts.ProxyType
+	}
+	if opts.ProxyHost != "" {
+		sessionCfg.Global.ProxyHost = opts.ProxyHost
+	}
+	if opts.ProxyPort > 0 {
+		sessionCfg.Global.ProxyPort = opts.ProxyPort
+	}
+	config.ApplyGlobalProxy(sessionCfg.Global)
 
 	// 插件全局默认开关与选项
 	sessionCfg.SetPluginEnabled(domain.CapGPXMatching, opts.EnableGPXMatch)
@@ -706,6 +869,25 @@ func Photools_SavePreferences(optionsJSON *C.char) C.int {
 		return -1
 	}
 	return 0
+}
+
+//export Photools_ApplyProxy
+func Photools_ApplyProxy(enabled C.int, proxyType, proxyHost *C.char, port C.int) {
+	var pType, pHost string
+	if proxyType != nil {
+		pType = C.GoString(proxyType)
+	}
+	if proxyHost != nil {
+		pHost = C.GoString(proxyHost)
+	}
+	config.ApplyGlobalProxy(
+		config.GlobalSettings{
+			ProxyEnabled: enabled != 0,
+			ProxyType:    pType,
+			ProxyHost:    pHost,
+			ProxyPort:    int(port),
+		},
+	)
 }
 
 //export Photools_GetGlobalConfigJSON
