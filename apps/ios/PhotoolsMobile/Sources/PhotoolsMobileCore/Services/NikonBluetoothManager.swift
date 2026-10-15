@@ -272,6 +272,7 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         let action = stateMachine.handlePairDataReceived(data)
         switch action {
         case .wait:
+            schedulePairRead()
             return
         case .sendStage3(let stage3Data):
             if !isReconnectingMode {
