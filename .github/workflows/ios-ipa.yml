@@ -1,0 +1,97 @@
+name: Build unsigned iPhone IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, codex/ios-ipa-build]
+    paths:
+      - '.github/workflows/ios-ipa.yml'
+      - 'apps/ios/PhotoolsMobile/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install project generator
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+          xcodegen --version
+      - name: Generate Xcode project
+        working-directory: apps/ios/PhotoolsMobile
+        run: xcodegen generate
+      - name: Build iPhone device application without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-output
+          xcodebuild \
+            -project apps/ios/PhotoolsMobile/PhotoolsMobile.xcodeproj \
+            -scheme PhotoolsMobile \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/photools-derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            build 2>&1 | tee build-output/xcodebuild.log
+      - name: Validate and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/photools-derived/Build/Products/Release-iphoneos/PhotoolsMobile.app"
+          test -d "$APP"
+          export APP
+          python3 - <<'PY'
+          import os, pathlib, plistlib, subprocess
+          app = pathlib.Path(os.environ['APP'])
+          with (app / 'Info.plist').open('rb') as f:
+              info = plistlib.load(f)
+          assert 'iPhoneOS' in info['CFBundleSupportedPlatforms'], info
+          assert {'bluetooth-central', 'location'} <= set(info['UIBackgroundModes'])
+          for key in ['NSBluetoothAlwaysUsageDescription', 'NSLocationAlwaysAndWhenInUseUsageDescription', 'NSMotionUsageDescription']:
+              assert info.get(key), key
+          exe = app / info['CFBundleExecutable']
+          arch = subprocess.check_output(['lipo', '-archs', str(exe)], text=True).strip()
+          assert 'arm64' in arch.split(), arch
+          assert any(app.glob('*.bundle')), 'Missing Swift package resource bundle'
+          report = f"Commit: {os.environ['GITHUB_SHA']}\nBundle: {info['CFBundleIdentifier']}\nMinimum iOS: {info['MinimumOSVersion']}\nArchitecture: {arch}\nSigning: unsigned; sign with your own certificate before installation\nCamera compatibility: not tested on Z6 II hardware\n"
+          pathlib.Path('build-output/BUILD-INFO.txt').write_text(report)
+          print(report)
+          PY
+          mkdir -p "$RUNNER_TEMP/photools-package/Payload"
+          ditto "$APP" "$RUNNER_TEMP/photools-package/Payload/PhotoolsMobile.app"
+          OUTPUT="$GITHUB_WORKSPACE/build-output/PhotoolsMobile-unsigned.ipa"
+          cd "$RUNNER_TEMP/photools-package"
+          ditto -c -k --keepParent Payload "$OUTPUT"
+          unzip -t "$OUTPUT"
+          cd "$GITHUB_WORKSPACE/build-output"
+          shasum -a 256 PhotoolsMobile-unsigned.ipa > SHA256SUMS.txt
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoolsMobile-unsigned-IPA
+          path: |
+            build-output/PhotoolsMobile-unsigned.ipa
+            build-output/BUILD-INFO.txt
+            build-output/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: build-output/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
