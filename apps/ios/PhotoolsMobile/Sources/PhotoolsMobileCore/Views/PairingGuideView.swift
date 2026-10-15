@@ -25,7 +25,7 @@ public struct PairingGuideView: View {
                                 .foregroundColor(.blue)
                         }
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("• 凭据自动装载：App 启动时已从配置文件自动加载真机握手密钥 (DeviceID / Nonce)；")
+                            Text("• 首次使用请先导入此相机的真实配对凭据；")
                             Text("• 摆脱 SnapBridge：日常连接无需进入相机配对菜单，更无需跳转系统蓝牙设置；")
                             Text("• 相机处于正常取景拍摄界面时，轻点下方「免配对直连」即可瞬间完成 Blowfish 认证！")
                         }
@@ -79,7 +79,7 @@ public struct PairingGuideView: View {
                                         Text(item.displayName)
                                             .font(.subheadline.bold())
                                         if item.isPrePaired {
-                                            Text("已配对")
+                                            Text("发现配对记录")
                                                 .font(.system(size: 10, weight: .bold))
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
@@ -87,7 +87,7 @@ public struct PairingGuideView: View {
                                                 .foregroundColor(.green)
                                                 .cornerRadius(6)
                                         } else {
-                                            Text("全新配对")
+                                            Text("待导入凭据")
                                                 .font(.system(size: 10, weight: .bold))
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)

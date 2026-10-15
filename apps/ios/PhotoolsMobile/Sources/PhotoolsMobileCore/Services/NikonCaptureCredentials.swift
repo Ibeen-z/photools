@@ -33,6 +33,14 @@ public enum NikonCaptureCredentials {
             let type = bytes[offset + 12]
             let packet = Array(bytes[(offset + 13)..<(offset + 4 + length)])
             offset += 4 + length
+            if type == 1, packet.count >= 6, packet[0] == 0x05 {
+                let disconnected = le16(packet, 3) & 0x0FFF
+                sessions.removeValue(forKey: disconnected)
+                readAttributes.removeValue(forKey: disconnected)
+                buffers.removeValue(forKey: "2:\(disconnected)")
+                buffers.removeValue(forKey: "3:\(disconnected)")
+                continue
+            }
             guard type == 2 || type == 3, packet.count >= 4 else { continue }
             let header = le16(packet, 0)
             let connection = header & 0x0FFF
@@ -63,8 +71,12 @@ public enum NikonCaptureCredentials {
                 let attribute = le16(att, 1)
                 let value = Data(att.dropFirst(3))
                 guard let message = PairingMessage(data: value) else { continue }
-                if message.stage == 1, message.device == deviceID {
-                    sessions[connection] = Session(attribute: attribute, stage1: message)
+                if message.stage == 1 {
+                    sessions.removeValue(forKey: connection)
+                    readAttributes.removeValue(forKey: connection)
+                    if message.device == deviceID {
+                        sessions[connection] = Session(attribute: attribute, stage1: message)
+                    }
                 } else if message.stage == 3, var session = sessions[connection], session.attribute == attribute {
                     session.responseMatched = session.expectedStage3 == value
                     sessions[connection] = session
@@ -86,9 +98,11 @@ public enum NikonCaptureCredentials {
             }
             guard attribute == session.attribute, let message = PairingMessage(data: value) else { continue }
             if message.stage == 2 {
-                session.expectedStage3 = NikonSecurityEngine.shared.verifyStage2AndBuildStage3(
+                let expected = NikonSecurityEngine.shared.verifyStage2AndBuildStage3(
                     stage1: session.stage1, stage2: message
                 )?.encode()
+                if expected != session.expectedStage3 { session.responseMatched = false }
+                session.expectedStage3 = expected
                 sessions[connection] = session
             } else if message.stage == 4, session.responseMatched {
                 return CameraCredentialConfig(

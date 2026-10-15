@@ -24,6 +24,8 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
     /// 记录当前相机在本次 App 进程或物理开机会话中是否已完成首轮时钟与时区校准
     public internal(set) var hasCompletedBootSync: Bool = false
 
+    private var handshakeGeneration: UInt64 = 0
+    private let callbackQueue: DispatchQueue
     private var handshakeTimeout: DispatchWorkItem?
     private var pairReadFallback: DispatchWorkItem?
     private var pendingNameWrite = false
@@ -39,9 +41,11 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         savedDeviceID: UInt32? = nil,
         savedNonce: UInt32? = nil,
         discoveredDeviceID: UInt32? = nil,
-        controllerName: String = "iPhone_NikonGPS"
+        controllerName: String = "iPhone_NikonGPS",
+        callbackQueue: DispatchQueue = .main
     ) {
         self.peripheral = peripheral
+        self.callbackQueue = callbackQueue
         let effectiveDeviceID = savedDeviceID ?? discoveredDeviceID
         self.stateMachine = CameraStateMachine(
             savedDeviceID: effectiveDeviceID,
@@ -72,6 +76,7 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
 
     /// 开始服务发现与监听激活流水线
     public func startDiscovery() {
+        handshakeGeneration &+= 1
         handshakeTimeout?.cancel()
         pairReadFallback?.cancel()
         pendingNameWrite = false
@@ -105,9 +110,11 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
     }
 
     private func failHandshake(_ reason: String) {
+        handshakeGeneration &+= 1
         handshakeTimeout?.cancel()
         pairReadFallback?.cancel()
         pendingNameWrite = false
+        stateMachine.fail(reason: reason)
         status = .error
         onStatusChanged?(self, status)
         onLog?(.error, "[\(peripheral.name ?? "相机")] 认证失败：\(reason)")
@@ -116,12 +123,13 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
     private func armHandshakeTimeout() {
         handshakeTimeout?.cancel()
         let expected = stateMachine.expectedPeerStage
+        let generation = handshakeGeneration
         let task = DispatchWorkItem { [weak self] in
-            guard let self = self, self.status == .handshaking else { return }
+            guard let self = self, self.status == .handshaking, self.handshakeGeneration == generation else { return }
             self.failHandshake("等待相机阶段 \(expected.map(String.init) ?? "名称写入确认") 超时；不会显示为同步成功")
         }
         handshakeTimeout = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: task)
+        callbackQueue.asyncAfter(deadline: .now() + 8, execute: task)
     }
 
     /// 部分机身通过 PAIR read 返回挑战；通知先到时取消这次补读。
@@ -129,15 +137,17 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         pairReadFallback?.cancel()
         guard let char = pairCharacteristic, char.properties.contains(.read),
               let expected = stateMachine.expectedPeerStage else { return }
+        let generation = handshakeGeneration
         let task = DispatchWorkItem { [weak self] in
             guard let self = self, self.status == .handshaking,
+                  self.handshakeGeneration == generation,
                   self.stateMachine.expectedPeerStage == expected,
                   self.peripheral.state == .connected else { return }
             self.onLog?(.info, "[\(self.peripheral.name ?? "相机")] 未收到阶段 \(expected) 通知，主动读取 PAIR")
             self.peripheral.readValue(for: char)
         }
         pairReadFallback = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: task)
+        callbackQueue.asyncAfter(deadline: .now() + 0.3, execute: task)
     }
 
     // MARK: - CBPeripheralDelegate
@@ -235,6 +245,7 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         if let error = error {
             let err = error as NSError
             onLog?(.warning, "[\(peripheral.name ?? "相机")] 读取特征失败：\(err.domain)/\(err.code)，\(err.localizedDescription)")
+            if characteristic.uuid == NikonUUIDs.pair, status == .handshaking { schedulePairRead() }
             return
         }
 
@@ -246,6 +257,7 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         }
 
         guard characteristic.uuid == NikonUUIDs.pair, let data = characteristic.value else { return }
+        guard status == .handshaking else { return }
 
 
         let stageNum = data.first.map { String(format: "0x%02X", $0) } ?? "??"
@@ -254,6 +266,7 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         // read 可能返回刚写入的 Stage 1/3 缓存；它不是相机的挑战。
         if let stage = data.first, stage == 0x01 || stage == 0x03 {
             onLog?(.info, "[\(peripheral.name ?? "相机")] PAIR 仍为本地写入阶段，等待远端挑战")
+            schedulePairRead()
             return
         }
         let action = stateMachine.handlePairDataReceived(data)
@@ -293,14 +306,12 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
             onLog?(.success, "[\(peripheral.name ?? "相机")] 认证全链路就绪，已连接！")
 
         case .error(let reason):
-            status = .error
-            onStatusChanged?(self, status)
-            onLog?(.error, "[\(peripheral.name ?? "相机")] 握手阶段失败: \(reason)")
+            failHandshake(reason)
         }
     }
 
     private func completeHandshake() {
-        guard pendingNameWrite else { return }
+        guard pendingNameWrite, status == .handshaking, stateMachine.state == .nameConfigured else { return }
         pendingNameWrite = false
         handshakeTimeout?.cancel()
         pairReadFallback?.cancel()
@@ -690,7 +701,8 @@ public final class NikonBluetoothManager: NSObject, CBCentralManagerDelegate, @u
                 savedDeviceID: effectiveDevID,
                 savedNonce: resolvedNonce,
                 discoveredDeviceID: discoveredDeviceID,
-                controllerName: matchedSaved?.controllerName ?? "iPhone_NikonGPS"
+                controllerName: matchedSaved?.controllerName ?? "iPhone_NikonGPS",
+                callbackQueue: dispatchQueue
             )
 
             session.onLog = { [weak self] level, msg in

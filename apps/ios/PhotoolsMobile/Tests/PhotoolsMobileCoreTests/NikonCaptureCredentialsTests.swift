@@ -77,4 +77,21 @@ final class NikonCaptureCredentialsTests: XCTestCase {
         XCTAssertThrowsError(try NikonCaptureCredentials.extract(from: capture(), cameraName: "Other Camera", deviceID: 0x55667788))
         XCTAssertThrowsError(try NikonCaptureCredentials.extract(from: Data(capture().dropLast(8)), cameraName: "Nikon Test", deviceID: device))
     }
+    func testNewIdentityCannotCompleteAnOldPartialHandshake() {
+        let other = PairingMessage(stage: 1, timestamp: 0, device: 0x55667788, nonce: 0)
+        let fourth = PairingMessage(stage: 4, timestamp: 0, device: 0, nonce: 0)
+        let combined = capture(final: false)
+            + att(2, [0x12, 0x10, 0] + Array(other.encode()))
+            + att(3, [0x1D, 0x10, 0] + Array(fourth.encode()))
+        XCTAssertThrowsError(try NikonCaptureCredentials.extract(from: combined, cameraName: "Nikon Test", deviceID: device))
+    }
+
+    func testDisconnectedHandleCannotCompleteAnOldPartialHandshake() {
+        let fourth = PairingMessage(stage: 4, timestamp: 0, device: 0, nonce: 0)
+        let combined = capture(final: false)
+            + record(1, [0x05, 0x04, 0, 1, 0, 0x13])
+            + att(3, [0x1D, 0x10, 0] + Array(fourth.encode()))
+        XCTAssertThrowsError(try NikonCaptureCredentials.extract(from: combined, cameraName: "Nikon Test", deviceID: device))
+    }
+
 }

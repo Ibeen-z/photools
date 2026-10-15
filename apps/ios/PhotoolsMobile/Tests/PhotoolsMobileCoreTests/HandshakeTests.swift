@@ -174,4 +174,18 @@ final class HandshakeTests: XCTestCase {
         XCTAssertNotEqual(machine.state, .ready)
     }
 
+    func testFailedHandshakeRejectsLateStage4AndCanRestart() {
+        let machine = CameraStateMachine(savedDeviceID: 0x11223344, savedNonce: 0xAABBCCDD)
+        _ = machine.startHandshake()
+        machine.fail(reason: "timeout")
+        XCTAssertNil(machine.expectedPeerStage)
+        let late = PairingMessage(stage: 4, timestamp: 0, device: 0, nonce: 0).encode()
+        guard case .error = machine.handlePairDataReceived(late) else {
+            return XCTFail("Late Stage 4 must not revive failed authentication")
+        }
+        machine.reset()
+        _ = machine.startHandshake()
+        XCTAssertEqual(machine.expectedPeerStage, 2)
+    }
+
 }

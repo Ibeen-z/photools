@@ -49,6 +49,12 @@ public final class CameraStateMachine: @unchecked Sendable {
         }
     }
 
+    /// 终止本轮认证；迟来的 Stage 4 不能复活失败会话。
+    public func fail(reason: String) {
+        state = .failed(reason: reason)
+        lastPairData = nil
+    }
+
     /// 重置状态机
     public func reset() {
         state = .idle
