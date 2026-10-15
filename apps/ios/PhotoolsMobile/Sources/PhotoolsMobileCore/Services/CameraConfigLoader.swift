@@ -51,6 +51,7 @@ public struct CameraCredentialConfig: Codable, Equatable, Sendable {
             bleIdentifier: nil,
             deviceID: dev,
             nonce: n,
+            controllerName: controllerName,
             isDefault: isDefault ?? false,
             lastConnectedAt: Date()
         )
@@ -66,6 +67,16 @@ public struct CameraCredentialsContainer: Codable, Equatable, Sendable {
     }
 }
 
+public enum CredentialImportError: LocalizedError {
+    case invalid(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalid(let message): return message
+        }
+    }
+}
+
 /// 相机配置加载器：负责从外部 JSON 资源中安全解析预置的相机凭据
 public final class CameraConfigLoader: Sendable {
     public static let shared = CameraConfigLoader()
@@ -76,6 +87,36 @@ public final class CameraConfigLoader: Sendable {
     public func load(from data: Data) throws -> [CameraDevice] {
         let container = try JSONDecoder().decode(CameraCredentialsContainer.self, from: data)
         return container.cameras.compactMap { $0.toCameraDevice() }
+    }
+
+    /// 手动导入时整份校验，拒绝部分成功及示例凭据。
+    public func loadForImport(from data: Data) throws -> [CameraDevice] {
+        let container = try JSONDecoder().decode(CameraCredentialsContainer.self, from: data)
+        guard !container.cameras.isEmpty else {
+            throw CredentialImportError.invalid("文件中没有相机凭据")
+        }
+        var devices: [CameraDevice] = []
+        var ids = Set<UInt32>()
+        for item in container.cameras {
+            guard !item.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let device = item.toCameraDevice(), device.deviceID != 0 else {
+                throw CredentialImportError.invalid("相机名称、DeviceID 或 Nonce 格式无效")
+            }
+            guard !Self.isExampleCamera(device) else {
+                throw CredentialImportError.invalid("这是示例凭据，请导入从本人 SnapBridge 通信中提取的真实凭据")
+            }
+            guard ids.insert(device.deviceID).inserted else {
+                throw CredentialImportError.invalid("文件包含重复的相机 DeviceID")
+            }
+            devices.append(device)
+        }
+        return devices
+    }
+
+    public static func isExampleCamera(_ camera: CameraDevice) -> Bool {
+        let name = camera.name.lowercased()
+        return camera.deviceID == 0x12345678 &&
+            (name.contains("example") || name.contains("demo"))
     }
 
     /// 解析指定 URL 路径的 JSON 文件

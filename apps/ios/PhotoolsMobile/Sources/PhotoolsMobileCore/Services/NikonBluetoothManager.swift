@@ -24,6 +24,12 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
     /// 记录当前相机在本次 App 进程或物理开机会话中是否已完成首轮时钟与时区校准
     public internal(set) var hasCompletedBootSync: Bool = false
 
+    private var handshakeGeneration: UInt64 = 0
+    private let callbackQueue: DispatchQueue
+    private var handshakeTimeout: DispatchWorkItem?
+    private var pairReadFallback: DispatchWorkItem?
+    private var pendingNameWrite = false
+
     public var onStatusChanged: ((CameraPeripheralSession, CameraConnectionStatus) -> Void)?
     public var onHandshakeCompleted: ((CameraPeripheralSession, UInt32, UInt32) -> Void)?
     public var onSessionReady: ((CameraPeripheralSession) -> Void)?
@@ -35,9 +41,11 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         savedDeviceID: UInt32? = nil,
         savedNonce: UInt32? = nil,
         discoveredDeviceID: UInt32? = nil,
-        controllerName: String = "iPhone_NikonGPS"
+        controllerName: String = "iPhone_NikonGPS",
+        callbackQueue: DispatchQueue = .main
     ) {
         self.peripheral = peripheral
+        self.callbackQueue = callbackQueue
         let effectiveDeviceID = savedDeviceID ?? discoveredDeviceID
         self.stateMachine = CameraStateMachine(
             savedDeviceID: effectiveDeviceID,
@@ -68,6 +76,10 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
 
     /// 开始服务发现与监听激活流水线
     public func startDiscovery() {
+        handshakeGeneration &+= 1
+        handshakeTimeout?.cancel()
+        pairReadFallback?.cancel()
+        pendingNameWrite = false
         status = .connecting
         onStatusChanged?(self, status)
         stateMachine.reset()
@@ -88,11 +100,54 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         status = .handshaking
         onStatusChanged?(self, status)
         let stage1Data = stateMachine.startHandshake()
-        let hexDump = stage1Data.map { String(format: "%02X", $0) }.joined(separator: " ")
+
         let modeDesc = isReconnectingMode ? "凭据重连" : "全新配对"
-        onLog?(.info, "[\(peripheral.name ?? "相机")] PAIR 通道已就绪，发起 Stage 1 认证挑战 (\(modeDesc), ID=0x\(String(stateMachine.activeDeviceID, radix: 16).uppercased()), Nonce=0x\(String(stateMachine.activeNonce, radix: 16).uppercased())): \(hexDump)")
+        onLog?(.info, "[\(peripheral.name ?? "相机")] PAIR 通道已就绪，发起 Stage 1 认证挑战 (\(modeDesc)，凭据已隐藏)")
         let writeType: CBCharacteristicWriteType = pairChar.properties.contains(.write) ? .withResponse : .withoutResponse
         peripheral.writeValue(stage1Data, for: pairChar, type: writeType)
+        armHandshakeTimeout()
+        if writeType == .withoutResponse { schedulePairRead() }
+    }
+
+    private func failHandshake(_ reason: String) {
+        handshakeGeneration &+= 1
+        handshakeTimeout?.cancel()
+        pairReadFallback?.cancel()
+        pendingNameWrite = false
+        stateMachine.fail(reason: reason)
+        status = .error
+        onStatusChanged?(self, status)
+        onLog?(.error, "[\(peripheral.name ?? "相机")] 认证失败：\(reason)")
+    }
+
+    private func armHandshakeTimeout() {
+        handshakeTimeout?.cancel()
+        let expected = stateMachine.expectedPeerStage
+        let generation = handshakeGeneration
+        let task = DispatchWorkItem { [weak self] in
+            guard let self = self, self.status == .handshaking, self.handshakeGeneration == generation else { return }
+            self.failHandshake("等待相机阶段 \(expected.map(String.init) ?? "名称写入确认") 超时；不会显示为同步成功")
+        }
+        handshakeTimeout = task
+        callbackQueue.asyncAfter(deadline: .now() + 8, execute: task)
+    }
+
+    /// 部分机身通过 PAIR read 返回挑战；通知先到时取消这次补读。
+    private func schedulePairRead() {
+        pairReadFallback?.cancel()
+        guard let char = pairCharacteristic, char.properties.contains(.read),
+              let expected = stateMachine.expectedPeerStage else { return }
+        let generation = handshakeGeneration
+        let task = DispatchWorkItem { [weak self] in
+            guard let self = self, self.status == .handshaking,
+                  self.handshakeGeneration == generation,
+                  self.stateMachine.expectedPeerStage == expected,
+                  self.peripheral.state == .connected else { return }
+            self.onLog?(.info, "[\(self.peripheral.name ?? "相机")] 未收到阶段 \(expected) 通知，主动读取 PAIR")
+            self.peripheral.readValue(for: char)
+        }
+        pairReadFallback = task
+        callbackQueue.asyncAfter(deadline: .now() + 0.3, execute: task)
     }
 
     // MARK: - CBPeripheralDelegate
@@ -138,7 +193,9 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
             case NikonUUIDs.pair:
                 self.pairCharacteristic = char
                 // 开启 PAIR 读通知以接收 Stage 2 与 Stage 4
-                peripheral.setNotifyValue(true, for: char)
+                if char.properties.contains(.notify) || char.properties.contains(.indicate) {
+                    peripheral.setNotifyValue(true, for: char)
+                }
             case NikonUUIDs.not1:
                 self.not1Characteristic = char
                 if char.properties.contains(.notify) || char.properties.contains(.indicate) {
@@ -155,15 +212,26 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
             }
         }
 
-        guard self.pairCharacteristic != nil else {
-            onLog?(.error, "[\(peripheral.name ?? "相机")] 缺失 PAIR 握手特征")
+        guard let pair = self.pairCharacteristic else {
+            failHandshake("缺失 PAIR 握手特征")
             return
+        }
+        onLog?(.info, "[\(peripheral.name ?? "相机")] PAIR 能力：read=\(pair.properties.contains(.read))，write=\(pair.properties.contains(.write))，notify=\(pair.properties.contains(.notify))，indicate=\(pair.properties.contains(.indicate))")
+        if !pair.properties.contains(.notify) && !pair.properties.contains(.indicate) {
+            guard pair.properties.contains(.read) else {
+                failHandshake("PAIR 不支持通知或读取")
+                return
+            }
+            sendStage1()
         }
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            onLog?(.error, "[\(peripheral.name ?? "相机")] 开启 \(characteristic.uuid.uuidString) 通知失败: \(error.localizedDescription)")
+            onLog?(.warning, "[\(peripheral.name ?? "相机")] 开启通知失败: \(error.localizedDescription)")
+            if characteristic.uuid == NikonUUIDs.pair, characteristic.properties.contains(.read), status == .connecting {
+                sendStage1()
+            }
             return
         }
 
@@ -175,7 +243,9 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            onLog?(.error, "[\(peripheral.name ?? "相机")] 读取特征失败: \(error.localizedDescription)")
+            let err = error as NSError
+            onLog?(.warning, "[\(peripheral.name ?? "相机")] 读取特征失败：\(err.domain)/\(err.code)，\(err.localizedDescription)")
+            if characteristic.uuid == NikonUUIDs.pair, status == .handshaking { schedulePairRead() }
             return
         }
 
@@ -187,52 +257,47 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
         }
 
         guard characteristic.uuid == NikonUUIDs.pair, let data = characteristic.value else { return }
+        guard status == .handshaking else { return }
 
-        let hexDump = data.map { String(format: "%02X", $0) }.joined(separator: " ")
+
         let stageNum = data.first.map { String(format: "0x%02X", $0) } ?? "??"
-        onLog?(.info, "[\(peripheral.name ?? "相机")] 收到 PAIR 报文 (Stage \(stageNum), \(data.count)B): \(hexDump)")
+        onLog?(.info, "[\(peripheral.name ?? "相机")] 收到 PAIR 报文 (Stage \(stageNum), \(data.count)B，内容已隐藏)")
 
+        // read 可能返回刚写入的 Stage 1/3 缓存；它不是相机的挑战。
+        if let stage = data.first, stage == 0x01 || stage == 0x03 {
+            onLog?(.info, "[\(peripheral.name ?? "相机")] PAIR 仍为本地写入阶段，等待远端挑战")
+            schedulePairRead()
+            return
+        }
         let action = stateMachine.handlePairDataReceived(data)
         switch action {
+        case .wait:
+            schedulePairRead()
+            return
         case .sendStage3(let stage3Data):
             if !isReconnectingMode {
                 onLog?(.info, "[\(peripheral.name ?? "相机")] 收到 Stage 2 挑战，Salt 验证成功！发送 Stage 3 回应...")
             }
+            pairReadFallback?.cancel()
             peripheral.writeValue(stage3Data, for: characteristic, type: .withResponse)
+            armHandshakeTimeout()
 
         case .sendDeviceName(let nameData):
-            // 写入设备名称 (优先采用无需应答模式写入)
-            if let idChar = self.idCharacteristic {
-                let writeType: CBCharacteristicWriteType = idChar.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-                peripheral.writeValue(nameData, for: idChar, type: writeType)
+            pairReadFallback?.cancel()
+            guard let idChar = self.idCharacteristic else {
+                failHandshake("缺失设备名称特征")
+                return
             }
-
-            let dev = stateMachine.activeDeviceID
-            let nonce = stateMachine.activeNonce
-
-            stateMachine.markReady()
-            status = .ready
-            onStatusChanged?(self, status)
-
-            if isReconnectingMode {
-                // 免配对凭据重连模式
-                if !hasCompletedBootSync {
-                    // 本次 App 进程或物理开机会话的首轮连通：强制校准时钟与时区
-                    ensureTimeSynchronized(force: true)
-                    hasCompletedBootSync = true
-                    onLog?(.success, "[\(peripheral.name ?? "相机")] ⏱️ 首轮连接时钟与时区已校准完成，GPS 会话已就绪！")
-                } else {
-                    // 待机休眠后的快门唤醒或保鲜心跳：严格跳过时间写入，仅极速秒级恢复会话
-                    onLog?(.success, "[\(peripheral.name ?? "相机")] ⚡️ 快门待机唤醒连通 (已跳过重复校时)，GPS 会话已就绪！")
-                }
-                onSessionReady?(self)
+            pendingNameWrite = true
+            if idChar.properties.contains(.write) {
+                peripheral.writeValue(nameData, for: idChar, type: .withResponse)
+                armHandshakeTimeout()
+            } else if idChar.properties.contains(.writeWithoutResponse) {
+                peripheral.writeValue(nameData, for: idChar, type: .withoutResponse)
+                onLog?(.info, "[\(peripheral.name ?? "相机")] 名称已提交（机身不提供写入确认）")
+                completeHandshake()
             } else {
-                // 初次配对模式：派发配对持久化并校准时钟
-                onHandshakeCompleted?(self, dev, nonce)
-                onLog?(.success, "[\(peripheral.name ?? "相机")] 🎉 纯 BLE 首次配对成功！(ID=0x\(String(dev, radix: 16).uppercased())) 🟢")
-                ensureTimeSynchronized(force: true)
-                hasCompletedBootSync = true
-                onSessionReady?(self)
+                failHandshake("设备名称特征不支持写入")
             }
 
         case .ready:
@@ -242,9 +307,41 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
             onLog?(.success, "[\(peripheral.name ?? "相机")] 认证全链路就绪，已连接！")
 
         case .error(let reason):
-            status = .error
-            onStatusChanged?(self, status)
-            onLog?(.error, "[\(peripheral.name ?? "相机")] 握手阶段失败: \(reason)")
+            failHandshake(reason)
+        }
+    }
+
+    private func completeHandshake() {
+        guard pendingNameWrite, status == .handshaking, stateMachine.state == .nameConfigured else { return }
+        pendingNameWrite = false
+        handshakeTimeout?.cancel()
+        pairReadFallback?.cancel()
+        let dev = stateMachine.activeDeviceID
+        let nonce = stateMachine.activeNonce
+
+        stateMachine.markReady()
+        status = .ready
+        onStatusChanged?(self, status)
+
+        if isReconnectingMode {
+            // 免配对凭据重连模式
+            if !hasCompletedBootSync {
+                // 本次 App 进程或物理开机会话的首轮连通：强制校准时钟与时区
+                ensureTimeSynchronized(force: true)
+                hasCompletedBootSync = true
+                onLog?(.success, "[\(peripheral.name ?? "相机")] ⏱️ 首轮连接时钟与时区已校准完成，GPS 会话已就绪！")
+            } else {
+                // 待机休眠后的快门唤醒或保鲜心跳：严格跳过时间写入，仅极速秒级恢复会话
+                onLog?(.success, "[\(peripheral.name ?? "相机")] ⚡️ 快门待机唤醒连通 (已跳过重复校时)，GPS 会话已就绪！")
+            }
+            onSessionReady?(self)
+        } else {
+            // 初次配对模式：派发配对持久化并校准时钟
+            onHandshakeCompleted?(self, dev, nonce)
+            onLog?(.success, "[\(peripheral.name ?? "相机")] 🎉 纯 BLE 首次配对成功！(ID=0x\(String(dev, radix: 16).uppercased())) 🟢")
+            ensureTimeSynchronized(force: true)
+            hasCompletedBootSync = true
+            onSessionReady?(self)
         }
     }
 
@@ -285,16 +382,24 @@ public final class CameraPeripheralSession: NSObject, CBPeripheralDelegate, @unc
 
     public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error = error {
-            onLog?(.warning, "[\(peripheral.name ?? "相机")] 特征写入异常 (\(characteristic.uuid.uuidString)): \(error.localizedDescription)")
+            let err = error as NSError
+            if characteristic.uuid == NikonUUIDs.pair || characteristic.uuid == NikonUUIDs.deviceName {
+                failHandshake("写入 \(characteristic.uuid.uuidString) 被拒绝：\(err.domain)/\(err.code)，\(err.localizedDescription)")
+            } else {
+                onLog?(.warning, "[\(peripheral.name ?? "相机")] 特征写入异常：\(err.domain)/\(err.code)，\(err.localizedDescription)")
+            }
             return
         }
-        if characteristic.uuid == NikonUUIDs.deviceName {
+        if characteristic.uuid == NikonUUIDs.pair {
+            schedulePairRead()
+        } else if characteristic.uuid == NikonUUIDs.deviceName {
+            completeHandshake()
             onLog?(.success, "[\(peripheral.name ?? "相机")] 智能设备名称已成功注册至相机！")
         } else if characteristic.uuid == NikonUUIDs.time {
             onLog?(.info, "[\(peripheral.name ?? "相机")] 相机时钟与时区已完成同步 ⏱️")
         } else if characteristic.uuid == NikonUUIDs.geo {
             if syncCount == 1 || syncCount % 10 == 0 {
-                onLog?(.success, "[\(peripheral.name ?? "相机")] GPS 坐标已成功写入相机 EXIF 📍 (累计 \(syncCount) 次)")
+                onLog?(.success, "[\(peripheral.name ?? "相机")] 相机已确认收到 GPS 数据（照片需另行检查） 📍 (累计 \(syncCount) 次)")
             }
             if syncCount % 3 == 0 {
                 // 常态巡航中，每 3 次注入主动采样一次蓝牙链路信号强度
@@ -578,17 +683,11 @@ public final class NikonBluetoothManager: NSObject, CBCentralManagerDelegate, @u
         let matchedSaved = savedCamera ?? savedCameras.first(where: {
             $0.matches(discoveredDeviceID: discoveredDeviceID, peripheralUUID: peripheral.identifier, peripheralName: peripheral.name)
         })
-        var resolvedNonce = matchedSaved?.nonce
+        let resolvedNonce = matchedSaved?.nonce
         let effectiveDevID = matchedSaved?.deviceID ?? discoveredDeviceID
 
-        // 智能自愈：若匹配到了有效 DeviceID 但缺少 Nonce（例如首次嗅探到广播或仅有 DeviceID），使用 SnapBridgeIdSolver 动态逆向求解真实 Nonce
-        if (resolvedNonce == nil || resolvedNonce == 0), let devID = effectiveDevID, devID != 0 {
-            let candidates = SnapBridgeIdSolver.candidatesFor(targetDevice: devID)
-            if let best = candidates.first {
-                resolvedNonce = best.nonce
-                onLog?(.info, "[\(peripheral.name ?? "相机")] 🎯 SnapBridgeIdSolver 成功反解相机凭据: DeviceID=0x\(String(devID, radix: 16).uppercased()), Nonce=0x\(String(best.nonce, radix: 16).uppercased())")
-            }
-        }
+        // 广播只包含 DeviceID；iPhone 的 Nonce 必须由真实配对记录提供。
+        // 不将 Android PRNG 候选值当作已经认证的凭据。
 
         let session: CameraPeripheralSession
         stateLock.lock()
@@ -596,12 +695,15 @@ public final class NikonBluetoothManager: NSObject, CBCentralManagerDelegate, @u
             session = existing
             stateLock.unlock()
             session.updateCredentials(savedDeviceID: effectiveDevID, savedNonce: resolvedNonce)
+            session.stateMachine.controllerName = matchedSaved?.controllerName ?? "iPhone_NikonGPS"
         } else {
             session = CameraPeripheralSession(
                 peripheral: peripheral,
                 savedDeviceID: effectiveDevID,
                 savedNonce: resolvedNonce,
-                discoveredDeviceID: discoveredDeviceID
+                discoveredDeviceID: discoveredDeviceID,
+                controllerName: matchedSaved?.controllerName ?? "iPhone_NikonGPS",
+                callbackQueue: dispatchQueue
             )
 
             session.onLog = { [weak self] level, msg in
@@ -657,6 +759,14 @@ public final class NikonBluetoothManager: NSObject, CBCentralManagerDelegate, @u
                 peripheralName: peripheral.name
             )
         })
+
+        #if os(iOS)
+        guard matchedSaved != nil else {
+            onLog?(.warning, "[\(peripheral.name ?? "相机")] 已发现相机，但缺少真实配对凭据。请通过右上角＋导入凭据 JSON 后重试。")
+            onSessionStateChanged?(peripheral.identifier, .error)
+            return
+        }
+        #endif
 
         let session = getOrCreateSession(
             for: peripheral,
@@ -997,6 +1107,7 @@ public final class NikonBluetoothManager: NSObject, CBCentralManagerDelegate, @u
         removeLastConnectAttemptTime(for: pID)
         let session = getSession(for: pID)
         let wasReady = (session?.status == .ready)
+        let handshakeState = session.map { String(describing: $0.stateMachine.state).components(separatedBy: "(").first ?? "未知" } ?? "未知"
 
         // 统一记录断开时间，标准 5 秒防抖冷静期过滤断开瞬态残包
         setLastDisconnectTime(now, for: pID)
@@ -1028,7 +1139,9 @@ public final class NikonBluetoothManager: NSObject, CBCentralManagerDelegate, @u
         // 判定为相机待机超时自然进入深睡待命，优雅呈现日志
         let nsErr = error as? NSError
         let isCameraNaturalSleep = error == nil || nsErr?.code == 7
-        if isCameraNaturalSleep {
+        if !wasReady {
+            onLog?(.warning, "[\(peripheral.name ?? "相机")] 认证未完成即断开（阶段：\(handshakeState)，原因码：\(nsErr?.code ?? 0)）。尚未同步 GPS，请检查导入的配对凭据。")
+        } else if isCameraNaturalSleep {
             onLog?(.info, "[\(peripheral.name ?? "相机")] 相机完成同步并自然转入休眠 💤 (多维保鲜仲裁守护中)")
         } else {
             let errDesc = nsErr.map { " (原因码 \($0.code): \($0.localizedDescription))" } ?? ""

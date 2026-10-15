@@ -1,9 +1,14 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 尼康相机配对向导视图
 public struct PairingGuideView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var coordinator = CameraSyncCoordinator.shared
+
+    @State private var showingCredentialImporter = false
+    @State private var importResult = ""
+    @State private var showingImportResult = false
 
     public init() {}
 
@@ -20,7 +25,7 @@ public struct PairingGuideView: View {
                                 .foregroundColor(.blue)
                         }
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("• 凭据自动装载：App 启动时已从配置文件自动加载真机握手密钥 (DeviceID / Nonce)；")
+                            Text("• 首次使用请先导入此相机的真实配对凭据；")
                             Text("• 摆脱 SnapBridge：日常连接无需进入相机配对菜单，更无需跳转系统蓝牙设置；")
                             Text("• 相机处于正常取景拍摄界面时，轻点下方「免配对直连」即可瞬间完成 Blowfish 认证！")
                         }
@@ -47,6 +52,15 @@ public struct PairingGuideView: View {
                     .padding(.vertical, 4)
                 }
 
+                Section("相机配对凭据") {
+                    Text("iPhone 的 SnapBridge 凭据需要从本人蓝牙通信记录中提取。只扫描到相机不代表认证通过。")
+                        .font(.caption)
+                    Button("导入凭据 JSON／蓝牙抓包") { showingCredentialImporter = true }
+                    Text("支持 JSON 或 PacketLogger .pklg。导入抓包前只开启目标相机并等待扫描到它。文件只在本机处理。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Section("附近扫描到的尼康设备 (\(coordinator.discoveredCameras.count))") {
                     if coordinator.discoveredCameras.isEmpty {
                         HStack {
@@ -65,7 +79,7 @@ public struct PairingGuideView: View {
                                         Text(item.displayName)
                                             .font(.subheadline.bold())
                                         if item.isPrePaired {
-                                            Text("已配对")
+                                            Text("发现配对记录")
                                                 .font(.system(size: 10, weight: .bold))
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
@@ -73,7 +87,7 @@ public struct PairingGuideView: View {
                                                 .foregroundColor(.green)
                                                 .cornerRadius(6)
                                         } else {
-                                            Text("全新配对")
+                                            Text("待导入凭据")
                                                 .font(.system(size: 10, weight: .bold))
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
@@ -116,6 +130,36 @@ public struct PairingGuideView: View {
                         coordinator.bluetoothManager.startScanning()
                     }
                 }
+            }
+            .fileImporter(isPresented: $showingCredentialImporter, allowedContentTypes: [.json, .data]) { result in
+                do {
+                    let url = try result.get()
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    let data = try Data(contentsOf: url)
+                    let credentials: Data
+                    if url.pathExtension.lowercased() == "pklg" {
+                        guard coordinator.discoveredCameras.count == 1,
+                              let target = coordinator.discoveredCameras.first,
+                              let deviceID = target.discoveredDeviceID else {
+                            throw CredentialImportError.invalid("请仅开启目标相机并扫描到它，再导入 .pklg 文件")
+                        }
+                        let item = try NikonCaptureCredentials.extract(from: data, cameraName: target.name, deviceID: deviceID)
+                        credentials = try JSONEncoder().encode(CameraCredentialsContainer(cameras: [item]))
+                    } else {
+                        credentials = data
+                    }
+                    let count = try coordinator.importCameraCredentials(from: credentials)
+                    importResult = "已导入 \(count) 台相机凭据。请返回相机列表尝试连接；导入成功不代表认证通过。"
+                } catch {
+                    importResult = "未导入：\(error.localizedDescription)"
+                }
+                showingImportResult = true
+            }
+            .alert("凭据导入", isPresented: $showingImportResult) {
+                Button("好", role: .cancel) { }
+            } message: {
+                Text(importResult)
             }
             .onAppear {
                 coordinator.bluetoothManager.startScanning()

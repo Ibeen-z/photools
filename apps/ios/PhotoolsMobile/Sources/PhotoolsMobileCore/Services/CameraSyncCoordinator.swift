@@ -497,6 +497,7 @@ public final class CameraSyncCoordinator: ObservableObject {
         locationProvider.onLocationReadyForSync = { [weak self] clLocation in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                guard self.bluetoothManager.activeSessions.values.contains(where: { $0.status == .ready }) else { return }
                 let geoPayload = GeoPayload(location: clLocation)
                 self.bluetoothManager.broadcastLocation(geo: geoPayload)
                 for (camUUID, session) in self.bluetoothManager.activeSessions where session.status == .ready {
@@ -672,6 +673,16 @@ public final class CameraSyncCoordinator: ObservableObject {
         #endif
     }
 
+    /// 用户主动选择文件后导入；沿用本机持久化，不上传凭据。
+    @discardableResult
+    public func importCameraCredentials(from data: Data) throws -> Int {
+        let cameras = try CameraConfigLoader.shared.loadForImport(from: data)
+        savedCameras.removeAll(where: CameraConfigLoader.isExampleCamera)
+        for camera in cameras { saveCamera(camera) }
+        appendLog(level: .info, message: "已导入 \(cameras.count) 台相机凭据，尚需连接认证验证")
+        return cameras.count
+    }
+
     public func removeCamera(id: UUID) {
         savedCameras.removeAll(where: { $0.id == id })
         flushPersistCameras()
@@ -693,7 +704,9 @@ public final class CameraSyncCoordinator: ObservableObject {
         }
 
         // 从软件外部配置文件装载预置相机 (由 extract_pklg_credentials.py 从真机抓包生成)
+        savedCameras.removeAll(where: CameraConfigLoader.isExampleCamera)
         let preconfigured = CameraConfigLoader.shared.loadPreconfiguredCameras()
+            .filter { !CameraConfigLoader.isExampleCamera($0) }
         var hasChanges = false
         for cam in preconfigured {
             if !savedCameras.contains(where: { $0.deviceID == cam.deviceID }) {
