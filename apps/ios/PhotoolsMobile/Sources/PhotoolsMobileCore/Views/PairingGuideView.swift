@@ -1,9 +1,14 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 尼康相机配对向导视图
 public struct PairingGuideView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var coordinator = CameraSyncCoordinator.shared
+
+    @State private var showingCredentialImporter = false
+    @State private var importResult = ""
+    @State private var showingImportResult = false
 
     public init() {}
 
@@ -45,6 +50,15 @@ public struct PairingGuideView: View {
                         .foregroundColor(.secondary)
                     }
                     .padding(.vertical, 4)
+                }
+
+                Section("相机配对凭据") {
+                    Text("iPhone 的 SnapBridge 凭据需要从本人蓝牙通信记录中提取。只扫描到相机不代表认证通过。")
+                        .font(.caption)
+                    Button("导入凭据 JSON／蓝牙抓包") { showingCredentialImporter = true }
+                    Text("支持 JSON 或 PacketLogger .pklg。导入抓包前只开启目标相机并等待扫描到它。文件只在本机处理。")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 Section("附近扫描到的尼康设备 (\(coordinator.discoveredCameras.count))") {
@@ -116,6 +130,36 @@ public struct PairingGuideView: View {
                         coordinator.bluetoothManager.startScanning()
                     }
                 }
+            }
+            .fileImporter(isPresented: $showingCredentialImporter, allowedContentTypes: [.json, .data]) { result in
+                do {
+                    let url = try result.get()
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    let data = try Data(contentsOf: url)
+                    let credentials: Data
+                    if url.pathExtension.lowercased() == "pklg" {
+                        guard coordinator.discoveredCameras.count == 1,
+                              let target = coordinator.discoveredCameras.first,
+                              let deviceID = target.discoveredDeviceID else {
+                            throw CredentialImportError.invalid("请仅开启目标相机并扫描到它，再导入 .pklg 文件")
+                        }
+                        let item = try NikonCaptureCredentials.extract(from: data, cameraName: target.name, deviceID: deviceID)
+                        credentials = try JSONEncoder().encode(CameraCredentialsContainer(cameras: [item]))
+                    } else {
+                        credentials = data
+                    }
+                    let count = try coordinator.importCameraCredentials(from: credentials)
+                    importResult = "已导入 \(count) 台相机凭据。请返回相机列表尝试连接；导入成功不代表认证通过。"
+                } catch {
+                    importResult = "未导入：\(error.localizedDescription)"
+                }
+                showingImportResult = true
+            }
+            .alert("凭据导入", isPresented: $showingImportResult) {
+                Button("好", role: .cancel) { }
+            } message: {
+                Text(importResult)
             }
             .onAppear {
                 coordinator.bluetoothManager.startScanning()

@@ -46,6 +46,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: "Photools Mobile"
+        CFBundleShortVersionString: "1.0.1"
+        CFBundleVersion: "2"
         CFBundleDevelopmentRegion: "zh_CN"
         UIBackgroundModes:
           - bluetooth-central

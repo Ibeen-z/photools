@@ -27,6 +27,12 @@ jobs:
       - name: Generate Xcode project
         working-directory: apps/ios/PhotoolsMobile
         run: xcodegen generate
+      - name: Run Swift regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-output
+          swift test --package-path apps/ios/PhotoolsMobile 2>&1 | tee build-output/swift-test.log
       - name: Build iPhone device application without signing
         shell: bash
         run: |
@@ -92,6 +98,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ios-build-log
-          path: build-output/xcodebuild.log
+          path: build-output/*.log
           if-no-files-found: ignore
           retention-days: 7

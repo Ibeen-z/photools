@@ -15,6 +15,7 @@ public enum HandshakeState: Equatable, Sendable {
 /// 单个相机会话的状态机驱动器
 public final class CameraStateMachine: @unchecked Sendable {
     public private(set) var state: HandshakeState = .idle
+    private var lastPairData: Data?
     private let securityEngine: NikonSecurityEngine
     public private(set) var savedDeviceID: UInt32?
     public private(set) var savedNonce: UInt32?
@@ -51,10 +52,12 @@ public final class CameraStateMachine: @unchecked Sendable {
     /// 重置状态机
     public func reset() {
         state = .idle
+        lastPairData = nil
     }
 
     /// 开始握手：生成 Stage 1 载荷
     public func startHandshake() -> Data {
+        lastPairData = nil
         let stage1 = PairingMessage.createStage1(deviceID: savedDeviceID, nonce: savedNonce)
         self.activeDeviceID = stage1.device
         self.activeNonce = stage1.nonce
@@ -62,8 +65,18 @@ public final class CameraStateMachine: @unchecked Sendable {
         return stage1.encode()
     }
 
+    /// 当前等待的远端阶段，供通知与主动读取协同使用。
+    public var expectedPeerStage: UInt8? {
+        switch state {
+        case .stage1Sent: return 0x02
+        case .stage3Sent: return 0x04
+        default: return nil
+        }
+    }
+
     /// 收到 PAIR 特征数据更新 (相机返回的 Stage 2 或 Stage 4)
     public func handlePairDataReceived(_ data: Data) -> HandshakeNextStep {
+        if lastPairData == data { return .wait }
         guard let message = PairingMessage(data: data) else {
             state = .failed(reason: "解析 PAIR 报文失败，长度不足或格式损坏")
             return .error("报文格式损坏")
@@ -73,15 +86,17 @@ public final class CameraStateMachine: @unchecked Sendable {
         case (.stage1Sent(let stage1), 0x02):
             // 收到 Stage 2 挑战，验证 Salt 并计算 Stage 3
             guard let stage3 = securityEngine.verifyStage2AndBuildStage3(stage1: stage1, stage2: message) else {
-                let diag = "Stage 2 挑战校验失败 (相机下发 Dev=0x\(String(message.device, radix: 16).uppercased()), Nonce=0x\(String(message.nonce, radix: 16).uppercased()), 我方 Stage1 Dev=0x\(String(stage1.device, radix: 16).uppercased()), Nonce=0x\(String(stage1.nonce, radix: 16).uppercased()))"
+                let diag = "Stage 2 挑战校验失败，请检查配对凭据（敏感数据已隐藏）"
                 state = .failed(reason: diag)
                 return .error(diag)
             }
+            lastPairData = data
             state = .stage3Sent(stage3: stage3)
             return .sendStage3(stage3.encode())
 
         case (.stage3Sent, 0x04):
             // 收到 Stage 4 确认，握手认证成功！接下来向 ID 写入设备名称
+            lastPairData = data
             state = .stage4Verified
             let nameData = formatControllerName(controllerName)
             state = .nameConfigured
@@ -112,6 +127,7 @@ public final class CameraStateMachine: @unchecked Sendable {
 
 /// 状态机下一步动作指令
 public enum HandshakeNextStep: Equatable, Sendable {
+    case wait
     case sendStage3(Data)
     case sendDeviceName(Data)
     case ready

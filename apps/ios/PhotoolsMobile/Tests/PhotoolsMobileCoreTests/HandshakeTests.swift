@@ -127,4 +127,51 @@ final class HandshakeTests: XCTestCase {
         XCTAssertEqual(updatedMsg.device, knownDeviceID, "热更新后 Stage 1 必须使用真实配对 Device ID，绝不能再随机生成！")
         XCTAssertEqual(updatedMsg.nonce, knownNonce, "热更新后 Stage 1 必须使用保存的 Nonce")
     }
+    func testExpectedPeerStageTracksPendingAuthentication() {
+        let machine = CameraStateMachine(savedDeviceID: 0x3c3ae501, savedNonce: 0x3fdaa451)
+        // Use deterministic recorded input via the ordinary start handshake path's peer stage.
+        XCTAssertNil(machine.expectedPeerStage)
+        _ = machine.startHandshake()
+        XCTAssertEqual(machine.expectedPeerStage, 2)
+        machine.reset()
+        XCTAssertNil(machine.expectedPeerStage)
+    }
+
+    func testStage4BeforeStage2DoesNotAuthenticate() {
+        let machine = CameraStateMachine(savedDeviceID: 0x11223344, savedNonce: 0xAABBCCDD)
+        _ = machine.startHandshake()
+        let premature = PairingMessage(stage: 4, timestamp: 0, device: 0, nonce: 0)
+        guard case .error = machine.handlePairDataReceived(premature.encode()) else {
+            return XCTFail("Out-of-order Stage 4 must be rejected")
+        }
+        XCTAssertNotEqual(machine.state, .ready)
+    }
+
+    func testDuplicatePeerReplyIsIdempotent() {
+        let machine = CameraStateMachine(savedDeviceID: 0x11223344, savedNonce: 0xAABBCCDD)
+        let initial = machine.startHandshake()
+        let timestamp = Array(initial[1..<9])
+        func word(_ start: Int) -> UInt32 {
+            timestamp[start..<(start + 4)].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        }
+        let challenge = NikonSecurityEngine.shared.hash(blocks: [
+            NikonSecurityEngine.salts[0][0], NikonSecurityEngine.salts[0][1],
+            0x01020304, 0x05060708, word(0), word(4)
+        ])!
+        let second = PairingMessage(stage: 2, timestamp: 0x0807060504030201,
+                                   device: challenge.left.byteSwapped, nonce: challenge.right.byteSwapped).encode()
+        guard case .sendStage3 = machine.handlePairDataReceived(second) else {
+            return XCTFail("Valid Stage 2 should produce Stage 3")
+        }
+        XCTAssertEqual(machine.expectedPeerStage, 4)
+        XCTAssertEqual(machine.handlePairDataReceived(second), .wait)
+        XCTAssertEqual(machine.expectedPeerStage, 4)
+        let fourth = PairingMessage(stage: 4, timestamp: 0, device: 0, nonce: 0).encode()
+        guard case .sendDeviceName = machine.handlePairDataReceived(fourth) else {
+            return XCTFail("Stage 4 should advance to name configuration")
+        }
+        XCTAssertEqual(machine.handlePairDataReceived(fourth), .wait)
+        XCTAssertNotEqual(machine.state, .ready)
+    }
+
 }

@@ -16,6 +16,7 @@ public struct CameraDevice: Identifiable, Codable, Equatable, Sendable {
     public var name: String               // 相机名称 (例如 "NIKON Z 8", "NIKON Z 50_2")
     public var bleIdentifier: String?     // CoreBluetooth peripheral identifier UUID 字符串
     public var deviceID: UInt32           // 协议中的 4 字节 deviceID
+    public var controllerName: String?
     public var nonce: UInt32              // 协议中的 4 字节 nonce
     public var isDefault: Bool            // 是否为启动自动连接的默认相机
     public var lastConnectedAt: Date?     // 上次连接时间
@@ -27,6 +28,7 @@ public struct CameraDevice: Identifiable, Codable, Equatable, Sendable {
         bleIdentifier: String? = nil,
         deviceID: UInt32 = 0,
         nonce: UInt32 = 0,
+        controllerName: String? = nil,
         isDefault: Bool = false,
         lastConnectedAt: Date? = nil,
         totalSyncCount: Int = 0
@@ -36,6 +38,7 @@ public struct CameraDevice: Identifiable, Codable, Equatable, Sendable {
         self.bleIdentifier = bleIdentifier
         self.deviceID = deviceID
         self.nonce = nonce
+        self.controllerName = controllerName
         self.isDefault = isDefault
         self.lastConnectedAt = lastConnectedAt
         self.totalSyncCount = totalSyncCount
